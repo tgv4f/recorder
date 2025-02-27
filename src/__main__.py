@@ -14,7 +14,9 @@ from src import constants, utils, config
 
 logger = utils.get_logger(
     name = "tests",
-    filepath = constants.LOG_FILEPATH
+    filepath = constants.LOG_FILEPATH,
+    console_log_level = config.CONSOLE_LOG_LEVEL,
+    file_log_level = config.FILE_LOG_LEVEL
 )
 
 
@@ -32,7 +34,8 @@ recorder_py = RecorderPy(
     logger = logger,
     app = app,
     call_py = call_py,
-    quality = AudioQuality.HIGH
+    quality = AudioQuality.HIGH,
+    write_log_debug_progress = True
 )
 
 

@@ -38,8 +38,7 @@ class RecorderWorker:
         send_to_chat_peer: InputPeer,
         to_listen_user_ids: typing.Collection[int] | None = None,
         max_duration: float = 15.,
-        silence_threshold: float = 3.,
-        upload_files_workers_count: int = 1
+        silence_threshold: float = 3.
     ):
         self.listen_chat_id = listen_chat_id
         self._send_to_chat_peer = send_to_chat_peer
@@ -52,10 +51,11 @@ class RecorderWorker:
         self._channels = parent._channels
         self._sample_rate = parent._sample_rate
         self._channel_second_rate = parent._channel_second_rate
+        self._upload_files_workers_count = parent._upload_files_workers_count
+        self._write_log_debug_progress = parent._write_log_debug_progress
 
         self._pcm_max_duration_in_size = int(self._channel_second_rate * max_duration)
         self._pcm_silence_threshold_in_size = int(self._channel_second_rate * silence_threshold)
-        self._upload_files_workers_count = upload_files_workers_count
 
         self._is_running = False
         self.ssrc_and_tg_id: bidict[int, int] = bidict()
@@ -71,11 +71,17 @@ class RecorderWorker:
     def is_running(self) -> bool:
         return self._is_running
 
+    def _get_log_pre_str(self, user_id: int | None) -> str:
+        return f"[{self.listen_chat_id}:{user_id or ''}]"
+
+    def _log_debug(self, user_id: int | None, msg: typing.Any, **kwargs: typing.Any) -> None:
+        self._logger.debug(f"{self._get_log_pre_str(user_id)} {msg}", **kwargs)
+
     def _log_info(self, user_id: int | None, msg: typing.Any, **kwargs: typing.Any) -> None:
-        self._logger.info(f"[{self.listen_chat_id}:{user_id or ''}] {msg}", **kwargs)
+        self._logger.info(f"{self._get_log_pre_str(user_id)} {msg}", **kwargs)
 
     def _log_exception(self, user_id: int | None, msg: typing.Any, ex: Exception, **kwargs: typing.Any) -> None:
-        self._logger.exception(f"[{self.listen_chat_id}:{user_id or ''}] {msg}", exc_info=ex, **kwargs)
+        self._logger.exception(f"{self._get_log_pre_str(user_id)} {msg}", exc_info=ex, **kwargs)
 
     def _pcm_to_ogg(self, data: bytes) -> bytes:
         """
@@ -236,8 +242,9 @@ class RecorderWorker:
 
                 chunk_len = len(chunk)
 
-                progress = self._pcm_buffers_sizes[user_id] / self._pcm_max_duration_in_size * 100
-                print(f"[{user_id}] Current PCM buffer status: {self._pcm_buffers_sizes[user_id]} bytes | {progress} %")
+                if self._write_log_debug_progress:
+                    progress = self._pcm_buffers_sizes[user_id] / self._pcm_max_duration_in_size * 100
+                    self._log_debug(user_id, f"Current PCM buffer status: {self._pcm_buffers_sizes[user_id]} bytes | {progress:.5f} %")
 
                 if self._pcm_buffers_sizes[user_id] + chunk_len <= self._pcm_max_duration_in_size:
                     self._pcm_buffers[user_id].write(chunk)
@@ -293,7 +300,7 @@ class RecorderWorker:
 
                 self.ssrc_and_tg_id.inverse[user_id] = participant.source
 
-            self._log_info(None, f"Participants in chat {self.listen_chat_id}: {len(participants)}")
+            self._log_debug(None, f"Participants in chat {self.listen_chat_id}: {len(participants)}")
 
     async def _wrapper_logger(self, coro: typing.Awaitable[T]) -> T | None:
         try:

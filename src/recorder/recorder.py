@@ -17,7 +17,8 @@ class RecorderPy:
         quality: AudioQuality,
         max_duration: float = 15.,
         silence_threshold: float = 3.,
-        upload_files_workers_count: int = 1
+        upload_files_workers_count: int = 1,
+        write_log_debug_progress: bool = False
     ):
         self._logger = logger
         self._app = app
@@ -37,6 +38,7 @@ class RecorderPy:
         self._max_duration = max_duration
         self._silence_threshold = silence_threshold
         self._upload_files_workers_count = upload_files_workers_count
+        self._write_log_debug_progress = write_log_debug_progress
 
     @property
     def is_running(self) -> bool:
