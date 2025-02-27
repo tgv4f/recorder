@@ -1,22 +1,14 @@
-from pyrogram import Client, raw
-from pyrogram.session import Session
-from pytgcalls import PyTgCalls, exceptions as calls_excs
-from pytgcalls.types import Direction, RecordStream, StreamFrames, GroupCallParticipant, UpdatedGroupCallParticipant, AudioQuality, Frame
+from pyrogram.client import Client
+from pyrogram.raw.base.input_peer import InputPeer
+from pytgcalls import PyTgCalls, exceptions as calls_exceptions
+from pytgcalls.types import RecordStream, GroupCallParticipant, UpdatedGroupCallParticipant, AudioQuality, Frame
 
-from bidict import bidict
-from io import BytesIO
 from logging import Logger
 
-import asyncio
-
-# from .. import utils
-# from .worker import RecorderWorker
+import typing
 
 
 class RecorderPy:
-    # PEERS_CACHE: dict[int, raw.base.InputPeer] = {}
-    SSRC_AND_TG_ID: bidict[int, int] = bidict()
-
     def __init__(
         self,
         logger: Logger,
@@ -27,18 +19,18 @@ class RecorderPy:
         silence_threshold: float = 3.,
         upload_files_workers_count: int = 1
     ):
-        from .worker import RecorderWorker
-
         self._logger = logger
         self._app = app
         self._call_py = call_py
-        self._call_py_binding = call_py._binding
+        self._call_py_binding = call_py._binding  # type: ignore
         self._quality = quality
 
-        self.worker: RecorderWorker | None = None
+        from .worker import RecorderWorker
 
         self._is_running = False
+        self.worker: RecorderWorker | None = None
 
+        self._app_user_id: int | None = None
         self._sample_rate = quality.value[0]
         self._channels = quality.value[1]
         self._channel_second_rate = self._sample_rate * self._channels * 2
@@ -51,13 +43,16 @@ class RecorderPy:
         return self._is_running
 
     async def _process_participant_joined(self, participant: GroupCallParticipant) -> None:
-        pass
+        if not self.worker or not self.worker.is_running or (self.worker.to_listen_user_ids and participant.user_id not in self.worker.to_listen_user_ids):
+            return
+
+        self.worker.ssrc_and_tg_id.inverse[participant.user_id] = participant.source
 
     async def _process_participant_left_me(self) -> None:
         await self.stop()
 
     async def _process_participant_left(self, participant: GroupCallParticipant) -> None:
-        if participant.user_id == self._app.me.id:
+        if participant.user_id == self._app_user_id:
             await self._process_participant_left_me()
 
             return
@@ -68,11 +63,10 @@ class RecorderPy:
 
         participant = update.participant
 
-        match participant.action:
-            case GroupCallParticipant.Action.LEFT:
-                await self._process_participant_left(participant)
-            case GroupCallParticipant.Action.JOINED:
-                await self._process_participant_joined(participant)
+        if participant.action == GroupCallParticipant.Action.JOINED:
+            await self._process_participant_joined(participant)
+        elif participant.action == GroupCallParticipant.Action.LEFT:
+            await self._process_participant_left(participant)
 
     async def process_pcm_frame(self, frame: Frame) -> None:
         if not self._is_running or not self.worker or not self.worker.is_running:
@@ -80,24 +74,27 @@ class RecorderPy:
 
         await self.worker.process_pcm_frame(frame)
 
-    async def start(self, listen_chat_id: int, send_to_chat_peer: raw.base.InputPeer) -> None:
+    async def start(self, listen_chat_id: int, send_to_chat_peer: InputPeer, to_listen_user_ids: typing.Collection[int] | None=None) -> None:
         if self._is_running:
             return
 
         self._logger.info("Starting recorder...")
 
         self._is_running = True
+        self._app_user_id = (await self._app.get_me()).id  # type: ignore
 
         from .worker import RecorderWorker
 
         self.worker = RecorderWorker(
             parent = self,
             listen_chat_id = listen_chat_id,
-            send_to_chat_peer = send_to_chat_peer
+            send_to_chat_peer = send_to_chat_peer,
+            to_listen_user_ids = to_listen_user_ids
         )
 
-        # await binding.calls()   =>   {-1001183345400: <ntgcalls.MediaStatus object at 0x7fcb5d994570>}
-        for chat_id in (await self._call_py_binding.calls()).keys():
+        for chat_id in (await self._call_py_binding.calls()).keys():  # type: ignore
+            chat_id = typing.cast(int, chat_id)
+
             if chat_id != listen_chat_id:
                 try:
                     await self._call_py.leave_call(chat_id)
@@ -129,7 +126,7 @@ class RecorderPy:
         if self.worker:
             try:
                 await self._call_py.leave_call(self.worker.listen_chat_id)
-            except calls_excs.NoActiveGroupCall:
+            except calls_exceptions.NoActiveGroupCall:
                 pass
 
             if self.worker.is_running:

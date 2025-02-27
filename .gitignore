@@ -17,3 +17,4 @@ logs/
 !src/
 !requirements.txt
 !config.sample.py
+!pyrightconfig.json

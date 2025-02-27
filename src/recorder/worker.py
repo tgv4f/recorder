@@ -1,9 +1,16 @@
+from pyrogram.raw.base.input_peer import InputPeer
+from pyrogram.session.session import Session
+from pyrogram.raw.types.input_media_uploaded_document import InputMediaUploadedDocument
+from pyrogram.raw.types.document_attribute_audio import DocumentAttributeAudio
+from pyrogram.raw.functions.messages.send_media import SendMedia
+from pyrogram.raw.functions.upload.save_file_part import SaveFilePart
+from pyrogram.raw.types.input_file import InputFile
+from pyrogram.raw.functions.upload.save_big_file_part import SaveBigFilePart
+from pyrogram.raw.types.input_file_big import InputFileBig
+from pytgcalls.types import GroupCallParticipant, Frame
+
 from io import BytesIO
-
-from pyrogram import raw
-from pyrogram.session import Session
-from pytgcalls.types import Frame
-
+from bidict import bidict
 from hashlib import md5
 
 import numpy as np
@@ -20,22 +27,28 @@ FILE_MIME_TYPE = "audio/ogg"
 NOT_BIG_MAX_FILE_SIZE = 10 * 1024 * 1024
 
 
+T = typing.TypeVar("T")
+
+
 class RecorderWorker:
     def __init__(
         self,
-        parent: "RecorderPy",
+        parent: RecorderPy,
         listen_chat_id: int,
-        send_to_chat_peer: raw.base.InputPeer,
+        send_to_chat_peer: InputPeer,
+        to_listen_user_ids: typing.Collection[int] | None = None,
         max_duration: float = 15.,
         silence_threshold: float = 3.,
         upload_files_workers_count: int = 1
     ):
-        self._parent = parent
         self.listen_chat_id = listen_chat_id
         self._send_to_chat_peer = send_to_chat_peer
+        self.to_listen_user_ids = to_listen_user_ids
 
         self._logger = parent._logger
         self._app = parent._app
+        self._call_py = parent._call_py
+        self._app_user_id = parent._app_user_id
         self._channels = parent._channels
         self._sample_rate = parent._sample_rate
         self._channel_second_rate = parent._channel_second_rate
@@ -45,22 +58,23 @@ class RecorderWorker:
         self._upload_files_workers_count = upload_files_workers_count
 
         self._is_running = False
-        self._sender_task = None
-        self._participants_monitor_task = None
+        self.ssrc_and_tg_id: bidict[int, int] = bidict()
+        self._sender_task: asyncio.Task[None] | None = None
+        self._participants_monitor_task: asyncio.Task[None] | None = None
         self._process_pcm_locks: dict[int, asyncio.Lock] = {}
         self._upload_files_workers: list[asyncio.Task[None]] | None = None
-        self._upload_files_workers_rpc_queue = asyncio.Queue()
+        self._upload_files_workers_rpc_queue: asyncio.Queue[tuple[SaveFilePart | SaveBigFilePart, InputFile | InputFileBig, float, int]] = asyncio.Queue()
         self._app_file_session: Session | None = None
-        self._pcm_frame_queue: asyncio.Queue[Frame] = asyncio.Queue()
+        self._pcm_frame_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
 
     @property
     def is_running(self) -> bool:
         return self._is_running
 
-    def _log_info(self, user_id: int | None, msg, **kwargs) -> None:
+    def _log_info(self, user_id: int | None, msg: typing.Any, **kwargs: typing.Any) -> None:
         self._logger.info(f"[{self.listen_chat_id}:{user_id or ''}] {msg}", **kwargs)
 
-    def _log_exception(self, user_id: int | None, msg, ex, **kwargs) -> None:
+    def _log_exception(self, user_id: int | None, msg: typing.Any, ex: Exception, **kwargs: typing.Any) -> None:
         self._logger.exception(f"[{self.listen_chat_id}:{user_id or ''}] {msg}", exc_info=ex, **kwargs)
 
     def _pcm_to_ogg(self, data: bytes) -> bytes:
@@ -98,6 +112,9 @@ class RecorderWorker:
             except asyncio.TimeoutError:
                 continue
 
+            if not self._app_file_session:
+                return
+
             try:
                 await self._app_file_session.invoke(rpc)
 
@@ -106,11 +123,11 @@ class RecorderWorker:
 
                 return
 
-            media_subrpc = raw.types.InputMediaUploadedDocument(
+            media_subrpc = InputMediaUploadedDocument(
                 mime_type = FILE_MIME_TYPE,
-                file = file_subrpc,
+                file = file_subrpc,  # type: ignore
                 attributes = [
-                    raw.types.DocumentAttributeAudio(
+                    DocumentAttributeAudio(  # type: ignore
                         voice = True,
                         duration = int(duration)
                     )
@@ -119,9 +136,9 @@ class RecorderWorker:
 
             try:
                 await self._app.invoke(
-                    raw.functions.messages.SendMedia(
+                    SendMedia(
                         peer = self._send_to_chat_peer,
-                        media = media_subrpc,
+                        media = media_subrpc,  # type: ignore
                         message = f"{self.listen_chat_id} | {user_id}",
                         random_id = self._app.rnd_id()
                     )
@@ -137,22 +154,19 @@ class RecorderWorker:
     async def _upload_file(self, content: bytes, duration: float, user_id: int) -> None:
         file_id = self._app.rnd_id()
 
-        # with open(f"temp-{file_id}.{self.FILE_EXT}", "wb") as f:
-        #     f.write(content)
-
         content_len = len(content)
 
         is_big = content_len > NOT_BIG_MAX_FILE_SIZE
         filename = f"file-{file_id}.{FILE_EXT}"
 
         if not is_big:
-            rpc = raw.functions.upload.SaveFilePart(
+            rpc = SaveFilePart(
                 file_id = file_id,
                 file_part = 0,
                 bytes = content
             )
 
-            file_subrpc = raw.types.InputFile(
+            file_subrpc = InputFile(
                 id = file_id,
                 parts = 1,
                 name = filename,
@@ -160,14 +174,14 @@ class RecorderWorker:
             )
 
         else:
-            rpc = raw.functions.upload.SaveBigFilePart(
+            rpc = SaveBigFilePart(
                 file_id = file_id,
                 file_part = 0,
                 file_total_parts = 1,
                 bytes = content
             )
 
-            file_subrpc = raw.types.InputFileBig(
+            file_subrpc = InputFileBig(
                 id = file_id,
                 parts = 1,
                 name = filename
@@ -239,16 +253,17 @@ class RecorderWorker:
                     self._pcm_buffers[user_id].seek(chunk_len)
                     self._pcm_buffers_sizes[user_id] = chunk_len
 
-            await self._process_pcm_buffer(user_id)
+            for user_id in self._pcm_buffers.keys():
+                await self._process_pcm_buffer(user_id)
 
         self._log_info(None, "Background sender task finished.")
 
     async def process_pcm_frame(self, frame: Frame) -> None:
         """
-        Puts a PCM frame into the queue to be processed by the background sender.
+        Process incoming PCM frame.
         """
         ssrc = frame.ssrc
-        user_id = self._parent.SSRC_AND_TG_ID.get(ssrc, None)
+        user_id = self.ssrc_and_tg_id.get(ssrc, None)
 
         if not user_id:
             return
@@ -260,7 +275,10 @@ class RecorderWorker:
             await asyncio.sleep(3)
 
             try:
-                participants = await self._parent._call_py.get_participants(self.listen_chat_id)
+                participants = typing.cast(
+                    list[GroupCallParticipant],
+                    await self._call_py.get_participants(self.listen_chat_id)
+                )
 
             except Exception as ex:
                 self._log_exception(None, "Error while getting participants", ex)
@@ -270,17 +288,14 @@ class RecorderWorker:
             for participant in participants:
                 user_id = participant.user_id
 
-                if user_id == self._app.me.id:
+                if user_id == self._app_user_id or (self.to_listen_user_ids and user_id not in self.to_listen_user_ids):
                     continue
 
-                self._parent.SSRC_AND_TG_ID[participant.source] = user_id
+                self.ssrc_and_tg_id.inverse[user_id] = participant.source
 
             self._log_info(None, f"Participants in chat {self.listen_chat_id}: {len(participants)}")
 
-    async def wrapper_logger(self, coro) -> typing.Any:
-        """
-        Wrapper for coroutines that logs exceptions.
-        """
+    async def _wrapper_logger(self, coro: typing.Awaitable[T]) -> T | None:
         try:
             return await coro
         except Exception as ex:
@@ -288,34 +303,39 @@ class RecorderWorker:
 
     async def start(self) -> None:
         """
-        Start the model.
+        Start the worker session to record voice chat.
         """
+
         if self._is_running:
             raise ValueError("Model is already running")
 
         self._is_running = True
 
         self._app_file_session = Session(
-            self._parent._app,
-            await self._parent._app.storage.dc_id(),
-            await self._parent._app.storage.auth_key(),
-            await self._parent._app.storage.test_mode(),
+            self._app,
+            await self._app.storage.dc_id(),  # type: ignore
+            await self._app.storage.auth_key(),  # type: ignore
+            await self._app.storage.test_mode(),  # type: ignore
             is_media = True
         )
 
         await self._app_file_session.start()
 
-        self._sender_task = asyncio.create_task(self.wrapper_logger(self._background_sender()))
-        self._participants_monitor_task = asyncio.create_task(self.wrapper_logger(self._participants_monitor()))
+        self._sender_task = asyncio.create_task(self._wrapper_logger(self._background_sender()))
+        self._participants_monitor_task = asyncio.create_task(self._wrapper_logger(self._participants_monitor()))
 
         self._current_file_workers = [
             asyncio.create_task(self._upload_files_worker())
-            for _ in range(self._parent._upload_files_workers_count)
+            for _ in range(self._upload_files_workers_count)
         ]
 
         self._log_info(None, "Session started")
 
     async def stop(self) -> None:
+        """
+        Stop the worker session.
+        """
+
         if self._is_running is False:
             return
 

@@ -1,7 +1,11 @@
-from pyrogram import Client, filters
+from pyrogram.client import Client
+from pyrogram import filters
 from pyrogram.types import Message
-from pytgcalls import PyTgCalls, filters as fl, idle
+from pyrogram.raw.base.input_peer import InputPeer
+from pytgcalls import PyTgCalls, filters as calls_filters, idle
 from pytgcalls.types import Direction, StreamFrames, UpdatedGroupCallParticipant, AudioQuality
+
+import typing
 
 from .recorder import RecorderPy
 
@@ -19,7 +23,7 @@ app = Client(
     api_id = config.API_ID,
     api_hash = config.API_HASH,
     phone_number = config.PHONE_NUMBER,
-    workdir = constants.WORK_DIRPATH
+    workdir = constants.WORK_DIRPATH.resolve().as_posix()
 )
 
 call_py = PyTgCalls(app)
@@ -32,9 +36,8 @@ recorder_py = RecorderPy(
 )
 
 
-SEND_TO_CHAT_PEER = None
-
-TO_LISTEN_USER_IDS = None
+SEND_TO_CHAT_PEER: InputPeer | None = None
+TO_LISTEN_USER_IDS: typing.Collection[int] | None = None
 
 
 PARTICIPANTS_SSRC_TO_TG_ID: dict[int, int] = {}
@@ -57,7 +60,7 @@ async def play_handler(_: Client, message: Message):
         chat_id = config.DEFAULT_LISTEN_CHAT_ID
 
     elif len(args) != 1 or not utils.is_int(args[0]):
-        await message.reply("A valid Chat ID must be specified")
+        await message.reply_text("A valid Chat ID must be specified")
 
         return
 
@@ -65,29 +68,33 @@ async def play_handler(_: Client, message: Message):
         chat_id = int(args[0])
 
     if recorder_py.is_running:
-        if recorder_py.worker.listen_chat_id == chat_id:
-            await message.reply(f"Already recording in chat {chat_id}")
+        if recorder_py.worker and recorder_py.worker.listen_chat_id == chat_id:
+            await message.reply_text(f"Already recording in chat {chat_id}")
 
             return
 
         await recorder_py.stop()
 
     if not SEND_TO_CHAT_PEER:
-        SEND_TO_CHAT_PEER = await app.resolve_peer(config.SEND_TO_CHAT_ID)
+        SEND_TO_CHAT_PEER = await app.resolve_peer(config.SEND_TO_CHAT_ID)  # type: ignore
 
-    await recorder_py.start(chat_id, SEND_TO_CHAT_PEER)
+    await recorder_py.start(
+        listen_chat_id = chat_id,
+        send_to_chat_peer = typing.cast(InputPeer, SEND_TO_CHAT_PEER),
+        to_listen_user_ids = TO_LISTEN_USER_IDS
+    )
 
-    await message.reply(f"Switched to listening to voice chat in chat {chat_id}")
+    await message.reply_text(f"Switched to listening to voice chat in chat {chat_id}")
 
 
 @app.on_message(chat_id_filter & filters.regex('!leave'))
 async def leave_handler(_: Client, message: Message):
-    await message.reply("Stopping recording...")
+    await message.reply_text("Stopping recording...")
 
     await recorder_py.stop()
 
 
-@call_py.on_update(fl.stream_frame(
+@call_py.on_update(calls_filters.stream_frame(
     # devices = Device.SPEAKER
     directions = Direction.INCOMING
 ))
@@ -96,10 +103,10 @@ async def stream_audio_frame_handler(_, update: StreamFrames):
         await recorder_py.process_pcm_frame(frame)
 
 
-@call_py.on_update(fl.call_participant())
+@call_py.on_update(calls_filters.call_participant())
 async def joined_handler(_, update: UpdatedGroupCallParticipant):
     await recorder_py.process_participant_update(update)
 
 
-call_py.start()
+call_py.start()  # type: ignore
 idle()
