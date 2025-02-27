@@ -16,7 +16,9 @@ class RecorderPy:
         call_py: PyTgCalls,
         quality: AudioQuality,
         max_duration: float = 15.,
-        silence_threshold: float = 3.,
+        silence_duration: float = 3.,
+        silence_threshold: float = 0.01,
+        silence_detector_duration: float = 5.,
         upload_files_workers_count: int = 1,
         write_log_debug_progress: bool = False
     ):
@@ -36,7 +38,10 @@ class RecorderPy:
         self._channels = quality.value[1]
         self._channel_second_rate = self._sample_rate * self._channels * 2
         self._max_duration = max_duration
+        self._pcm_max_duration_in_size = int(self._channel_second_rate * max_duration)
+        self._pcm_silence_duration_in_size = int(self._channel_second_rate * silence_duration)
         self._silence_threshold = silence_threshold
+        self._silence_detector_duration = silence_detector_duration
         self._upload_files_workers_count = upload_files_workers_count
         self._write_log_debug_progress = write_log_debug_progress
 
