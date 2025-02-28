@@ -64,7 +64,7 @@ async def _resolve_chat_id(value: int | str, as_peer: typing.Literal[True]=...) 
 
 async def _resolve_chat_id(value: int | str, as_peer: bool=False) -> int | InputPeer:
     if isinstance(value, str) and utils.is_int(value):
-        return int(value)
+        value = int(value)
 
     try:
         chat_peer: InputPeer = await app.resolve_peer(value)  # type: ignore
@@ -84,7 +84,7 @@ async def _resolve_chat_id(value: int | str, as_peer: bool=False) -> int | Input
 
 def _fix_chat_id(chat_id: int) -> int:
     if chat_id > 0:
-        return -1 * (1000000000000 + chat_id)
+        return -1_000_000_000_000 - chat_id
 
     return chat_id
 
