@@ -25,7 +25,7 @@ class RecorderPy:
         self._logger = logger
         self._app = app
         self._call_py = call_py
-        self._call_py_binding = call_py._binding  # type: ignore
+        self._call_py_binding = call_py._binding
         self._quality = quality
 
         from .worker import RecorderWorker

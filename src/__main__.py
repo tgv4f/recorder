@@ -44,10 +44,10 @@ recorder_py = RecorderPy(
 )
 
 
-SEND_TO_CHAT_PEER: InputPeer | None = None
+send_to_chat_peer: InputPeer | None = None
 
 
-async def _chat_id_filter(_, __, message: Message) -> bool:
+async def _chat_id_filter(_: typing.Any, __: typing.Any, message: Message) -> bool:
     return message.chat.id == config.SEND_TO_CHAT_ID
 
 chat_id_filter = filters.create(_chat_id_filter)
@@ -112,20 +112,20 @@ async def record_handler(_, message: Message):
 
     `!record`
     """
-    global SEND_TO_CHAT_PEER
+    global send_to_chat_peer
 
-    command_match = RECORD_COMMAND_REGEX.match(message.text[1 + 6:])  # skip prefix and command
+    command_match = RECORD_COMMAND_REGEX.match(typing.cast(str, message.text)[1 + 6:])  # skip prefix and command
 
     if not command_match:
         await message.reply_text("Invalid command format")
 
         return
 
-    command_match_data = command_match.groupdict()
+    command_match_data: dict[str, str] = command_match.groupdict()
 
-    listen_chat_id_str = typing.cast(str | None, command_match_data.get("listen_chat_id"))
-    join_as_id_str = typing.cast(str | None, command_match_data.get("join_as_id"))
-    to_listen_user_ids_str = typing.cast(str | None, command_match_data.get("to_listen_user_ids"))
+    listen_chat_id_str = command_match_data.get("listen_chat_id")
+    join_as_id_str = command_match_data.get("join_as_id")
+    to_listen_user_ids_str = command_match_data.get("to_listen_user_ids")
 
     processing_message = await message.reply_text("Processing...")
 
@@ -188,14 +188,14 @@ async def record_handler(_, message: Message):
 
         await recorder_py.stop()
 
-    if not SEND_TO_CHAT_PEER:
+    if not send_to_chat_peer:
         send_to_chat_id = config.SEND_TO_CHAT_ID
 
         if not send_to_chat_id:
             send_to_chat_id = message.chat.id
 
         try:
-            SEND_TO_CHAT_PEER = await _resolve_chat_id(send_to_chat_id, as_peer=True)
+            send_to_chat_peer = await _resolve_chat_id(send_to_chat_id, as_peer=True)
 
         except ValueError as ex:
             await processing_message.delete()
@@ -205,7 +205,7 @@ async def record_handler(_, message: Message):
 
     await recorder_py.start(
         listen_chat_id = listen_chat_id,
-        send_to_chat_peer = SEND_TO_CHAT_PEER,
+        send_to_chat_peer = send_to_chat_peer,
         join_as_peer = join_as_peer,
         to_listen_user_ids = to_listen_user_ids
     )
@@ -214,7 +214,7 @@ async def record_handler(_, message: Message):
 
     await message.reply_text((
         f"Started listening voice chat of <code>{listen_chat_id}</code>\n"
-        f"""Join as: {f"<code>{_fix_chat_id(_extract_id_from_peer(join_as_peer))}</code>" if join_as_peer else "<b>self</b>"}\n"""  # type: ignore
+        f"""Join as: {f"<code>{_fix_chat_id(typing.cast(int, _extract_id_from_peer(join_as_peer)))}</code>" if join_as_peer else "<b>self</b>"}\n"""
         f"""Listen user IDs: {f"<code>{', '.join(map(str, to_listen_user_ids))}</code>" if to_listen_user_ids else "<b>all</b>"}"""
     ))
 
