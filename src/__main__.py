@@ -53,18 +53,21 @@ async def _chat_id_filter(_, __, message: Message) -> bool:
 chat_id_filter = filters.create(_chat_id_filter)
 
 
-@typing.overload
-async def _resolve_chat_id(chat_id_str: int | str, as_peer: typing.Literal[False]=...) -> int: ...
+def _extract_id_from_peer(peer: InputPeer) -> int | None:
+    return getattr(peer, "chat_id", None) or getattr(peer, "channel_id", None) or getattr(peer, "user_id", None)
 
 @typing.overload
-async def _resolve_chat_id(chat_id_str: int | str, as_peer: typing.Literal[True]) -> InputPeer: ...
+async def _resolve_chat_id(value: int | str, as_peer: typing.Literal[False]=...) -> int: ...
 
-async def _resolve_chat_id(chat_id_str: int | str, as_peer: bool=False) -> int | InputPeer:
-    if isinstance(chat_id_str, str) and utils.is_int(chat_id_str):
-        return int(chat_id_str)
+@typing.overload
+async def _resolve_chat_id(value: int | str, as_peer: typing.Literal[True]=...) -> InputPeer: ...
+
+async def _resolve_chat_id(value: int | str, as_peer: bool=False) -> int | InputPeer:
+    if isinstance(value, str) and utils.is_int(value):
+        return int(value)
 
     try:
-        chat_peer: InputPeer = await app.resolve_peer(chat_id_str)  # type: ignore
+        chat_peer: InputPeer = await app.resolve_peer(value)  # type: ignore
 
     except Exception:
         raise ValueError("A valid peer must be specified")
@@ -72,12 +75,12 @@ async def _resolve_chat_id(chat_id_str: int | str, as_peer: bool=False) -> int |
     if as_peer:
         return chat_peer
 
-    chat_id = getattr(chat_peer, "chat_id", None) or getattr(chat_peer, "channel_id", None)
+    chat_id = _extract_id_from_peer(chat_peer)
 
     if not chat_id:
         raise ValueError("A valid ID must be specified")
 
-    return _fix_chat_id(chat_id)
+    return chat_id
 
 def _fix_chat_id(chat_id: int) -> int:
     if chat_id > 0:
@@ -139,7 +142,7 @@ async def record_handler(_, message: Message):
 
     else:
         try:
-            listen_chat_id = await _resolve_chat_id(listen_chat_id_str)
+            listen_chat_id = _fix_chat_id(await _resolve_chat_id(listen_chat_id_str))
 
         except ValueError as ex:
             await processing_message.delete()
@@ -208,14 +211,23 @@ async def record_handler(_, message: Message):
     )
 
     await processing_message.delete()
-    await message.reply_text(f"Switched to listening to voice chat in chat {listen_chat_id}")
+
+    await message.reply_text((
+        f"Started listening voice chat of <code>{listen_chat_id}</code>\n"
+        f"""Join as: {f"<code>{_fix_chat_id(_extract_id_from_peer(join_as_peer))}</code>" if join_as_peer else "<b>self</b>"}\n"""  # type: ignore
+        f"""Listen user IDs: {f"<code>{', '.join(map(str, to_listen_user_ids))}</code>" if to_listen_user_ids else "<b>all</b>"}"""
+    ))
 
 
-@app.on_message(chat_id_filter & filters.command("leave", COMMANDS_PREFIXES))
+@app.on_message(chat_id_filter & filters.command(["stop", "leave"], COMMANDS_PREFIXES))
 async def leave_handler(_, message: Message):
-    await message.reply_text("Stopping recording...")
+    stopping_message = await message.reply_text("Stopping recording...")
 
     await recorder_py.stop()
+
+    await stopping_message.delete()
+
+    await message.reply_text("Recording stopped")
 
 
 @call_py.on_update(calls_filters.stream_frame(
