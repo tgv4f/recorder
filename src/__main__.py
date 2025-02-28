@@ -114,7 +114,7 @@ async def record_handler(_, message: Message):
     """
     global send_to_chat_peer
 
-    command_match = RECORD_COMMAND_REGEX.match(typing.cast(str, message.text)[1 + 6:])  # skip prefix and command
+    command_match = RECORD_COMMAND_REGEX.match(typing.cast(str, message.text)[1 + len("record"):])  # skip prefix and command
 
     if not command_match:
         await message.reply_text("Invalid command format")

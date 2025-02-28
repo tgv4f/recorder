@@ -2,14 +2,23 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import logging
+import typing
 
 
-LOGGING_FORMAT = "%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s"
+LOGGING_FORMAT: typing.Final = "%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s"
+
+
+T = typing.TypeVar("T")
 
 
 class LoggerStrippingFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        record.msg = record.msg.strip() if isinstance(record.msg, str) else record.msg
+        record.msg = (
+            record.msg.strip()
+            if isinstance(record.msg, str)
+            else
+            record.msg
+        )
 
         return super().format(record)
 
@@ -42,9 +51,11 @@ def is_int(value: str) -> bool:
     return value.rstrip("-").isdigit()
 
 
-async def async_wrapper_logger(logger: logging.Logger, coro) -> None:
+async def async_wrapper_logger(logger: logging.Logger, coro: typing.Awaitable[T]) -> T | None:
     try:
-        await coro
+        return await coro
 
     except Exception as ex:
         logger.exception("Error in async function", exc_info=ex)
+
+    return None
