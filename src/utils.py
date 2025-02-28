@@ -5,7 +5,8 @@ import logging
 import typing
 
 
-LOGGING_FORMAT: typing.Final = "%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s"
+LOGGING_CONSOLE_FORMAT: typing.Final = "%(message)s"
+LOGGING_FILE_FORMAT: typing.Final = "%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s"
 
 
 T = typing.TypeVar("T")
@@ -29,7 +30,7 @@ def get_logger(name: str, filepath: Path, console_log_level: int=logging.INFO, f
 
     console_handler = logging.StreamHandler()
     console_handler.setLevel(console_log_level)
-    console_handler.setFormatter(logging.Formatter("%(message)s"))
+    console_handler.setFormatter(logging.Formatter(LOGGING_CONSOLE_FORMAT))
     logger.addHandler(console_handler)
 
     file_handler = RotatingFileHandler(
@@ -41,7 +42,7 @@ def get_logger(name: str, filepath: Path, console_log_level: int=logging.INFO, f
     )
 
     file_handler.setLevel(file_log_level)
-    file_handler.setFormatter(LoggerStrippingFormatter(LOGGING_FORMAT))
+    file_handler.setFormatter(LoggerStrippingFormatter(LOGGING_FILE_FORMAT))
     logger.addHandler(file_handler)
 
     return logger

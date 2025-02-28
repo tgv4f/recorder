@@ -64,7 +64,7 @@ def _extract_id_from_peer(peer: InputPeer) -> int | None:
 async def _resolve_chat_id(value: int | str, as_peer: typing.Literal[False]=...) -> int: ...
 
 @typing.overload
-async def _resolve_chat_id(value: int | str, as_peer: typing.Literal[True]=...) -> InputPeer: ...
+async def _resolve_chat_id(value: int | str, as_peer: typing.Literal[True]) -> InputPeer: ...
 
 async def _resolve_chat_id(value: int | str, as_peer: bool=False) -> int | InputPeer:
     if isinstance(value, str) and utils.is_int(value):
@@ -93,7 +93,7 @@ def _fix_chat_id(chat_id: int) -> int:
     return chat_id
 
 
-@app.on_message(chat_id_filter & filters.command(RECORD_COMAMND, COMMANDS_PREFIXES))
+@app.on_message(chat_id_filter & filters.command(RECORD_COMMAND, COMMANDS_PREFIXES))
 async def record_handler(_, message: Message):
     """
     Start recording voice chat.

@@ -35,7 +35,7 @@ class Config(BaseModel):
     console_log_level: int = Field(default=logging.INFO)
     file_log_level: int = Field(default=logging.DEBUG)
 
-    @field_validator("control_chat_id", "default_listen_chat_id", "send_to_chat_id", mode="before")
+    @field_validator("control_chat_id", "default_listen_chat_id", "send_to_chat_id", mode="after")
     @classmethod
     def validate_chat_id(cls, value: int | str | None) -> int | str | None:
         if isinstance(value, str):
