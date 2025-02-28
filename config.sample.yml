@@ -1,0 +1,10 @@
+session:
+  name: session
+  api_id: 123456
+  api_hash: "1234567890abcdef1234567890abcdef"
+  phone_number: "+1234567890"
+control_chat_id: -100  # or "@username"
+default_listen_chat_id: -100  # Optional; or "@username"
+send_to_chat_id: -100  # Optional; or "@username"
+console_log_level: DEBUG  # Optional; or DEBUG, WARNING, ERROR
+file_log_level: INFO  # Optional; or DEBUG, WARNING, ERROR

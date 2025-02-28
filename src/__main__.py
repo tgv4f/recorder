@@ -8,28 +8,29 @@ from pytgcalls.types import Direction, StreamFrames, UpdatedGroupCallParticipant
 import re
 import typing
 
-from .recorder import RecorderPy
-
-from src import constants, utils, config
+from src import constants, utils
+from src.recorder import RecorderPy
+from src.config import config
 
 
 COMMANDS_PREFIXES = "!"
-RECORD_COMMAND_REGEX = re.compile(r"^(?:\s+(?P<listen_chat_id>-|@?[a-zA-Z0-9_]{4,})(?:\s+(?P<join_as_id>@?[a-zA-Z0-9_]{4,}))?)?(?:\s*\n\s*(?P<to_listen_user_ids>(?:@?[a-zA-Z0-9_]{4,}\s*)*))?$")
+RECORD_COMMAND = "record"
+RECORD_COMMAND_PATTERN = re.compile(r"^(?:\s+(?P<listen_chat_id>-|@?[a-zA-Z0-9_]{4,})(?:\s+(?P<join_as_id>@?[a-zA-Z0-9_]{4,}))?)?(?:\s*\n\s*(?P<to_listen_user_ids>(?:@?[a-zA-Z0-9_]{4,}\s*)*))?$")
 
 
 logger = utils.get_logger(
     name = "tests",
     filepath = constants.LOG_FILEPATH,
-    console_log_level = config.CONSOLE_LOG_LEVEL,
-    file_log_level = config.FILE_LOG_LEVEL
+    console_log_level = config.console_log_level,
+    file_log_level = config.file_log_level
 )
 
 
 app = Client(
-    config.SESSION_NAME,
-    api_id = config.API_ID,
-    api_hash = config.API_HASH,
-    phone_number = config.PHONE_NUMBER,
+    name = config.session.name,
+    api_id = config.session.api_id,
+    api_hash = config.session.api_hash,
+    phone_number = config.session.phone_number,
     workdir = constants.WORK_DIRPATH.resolve().as_posix()
 )
 
@@ -48,7 +49,10 @@ send_to_chat_peer: InputPeer | None = None
 
 
 async def _chat_id_filter(_: typing.Any, __: typing.Any, message: Message) -> bool:
-    return message.chat.id == config.SEND_TO_CHAT_ID
+    if isinstance(config.control_chat_id, int):
+        return message.chat.id == config.control_chat_id
+
+    return message.chat.username.lower() == config.control_chat_id
 
 chat_id_filter = filters.create(_chat_id_filter)
 
@@ -89,7 +93,7 @@ def _fix_chat_id(chat_id: int) -> int:
     return chat_id
 
 
-@app.on_message(chat_id_filter & filters.command("record", COMMANDS_PREFIXES))
+@app.on_message(chat_id_filter & filters.command(RECORD_COMAMND, COMMANDS_PREFIXES))
 async def record_handler(_, message: Message):
     """
     Start recording voice chat.
@@ -114,7 +118,7 @@ async def record_handler(_, message: Message):
     """
     global send_to_chat_peer
 
-    command_match = RECORD_COMMAND_REGEX.match(typing.cast(str, message.text)[1 + len("record"):])  # skip prefix and command
+    command_match = RECORD_COMMAND_PATTERN.match(typing.cast(str, message.text)[1 + len(RECORD_COMMAND):])  # skip prefix and command
 
     if not command_match:
         await message.reply_text("Invalid command format")
@@ -130,15 +134,20 @@ async def record_handler(_, message: Message):
     processing_message = await message.reply_text("Processing...")
 
     if not listen_chat_id_str or listen_chat_id_str == "-":
-        listen_chat_id = config.DEFAULT_LISTEN_CHAT_ID
+        listen_chat_id = config.default_listen_chat_id or message.chat.id
 
-        if not listen_chat_id:
-            await processing_message.delete()
-            await message.reply_text("Default listen chat ID is not set in config")
+        if isinstance(listen_chat_id, int):
+            listen_chat_id = _fix_chat_id(listen_chat_id)
 
-            return
+        else:
+            try:
+                listen_chat_id = _fix_chat_id(await _resolve_chat_id(listen_chat_id))
 
-        listen_chat_id = _fix_chat_id(listen_chat_id)
+            except ValueError as ex:
+                await processing_message.delete()
+                await message.reply_text(f"Listen chat ID (config) = {listen_chat_id!r}" + "\n" + ex.args[0])
+
+        listen_chat_id = typing.cast(int, listen_chat_id)
 
     else:
         try:
@@ -189,10 +198,7 @@ async def record_handler(_, message: Message):
         await recorder_py.stop()
 
     if not send_to_chat_peer:
-        send_to_chat_id = config.SEND_TO_CHAT_ID
-
-        if not send_to_chat_id:
-            send_to_chat_id = message.chat.id
+        send_to_chat_id = config.send_to_chat_id or message.chat.id
 
         try:
             send_to_chat_peer = await _resolve_chat_id(send_to_chat_id, as_peer=True)

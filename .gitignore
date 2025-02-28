@@ -9,12 +9,12 @@ logs/
 *.zip
 *.json
 *.txt
-*config*.py
+*config*.yml
 *.session*
 
 !**/__init__.py
 !**/__main__.py
 !src/
 !requirements.txt
-!config.sample.py
+!config.sample.yml
 !pyrightconfig.json

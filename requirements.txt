@@ -24,3 +24,5 @@ TgCrypto==1.2.5
 typing_extensions==4.12.2
 yarl==1.18.3
 git+https://github.com/tgv4f/pytgcalls.git@41f5ba0ca20ab6e90d13a0dd25bf8b9479c4d87b
+pydantic==2.10.6
+pyyaml==6.0.2
