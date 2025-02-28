@@ -53,14 +53,14 @@ class RecorderWorker:
         self._pcm_max_duration_in_size = parent._pcm_max_duration_in_size
         self._pcm_silence_duration_in_size = parent._pcm_silence_duration_in_size
         self._silence_threshold = parent._silence_threshold
-        self._silence_detector_duration = parent._silence_detector_duration
+        self._latest_frame_detector_duration = parent._latest_frame_detector_duration
         self._upload_files_workers_count = parent._upload_files_workers_count
         self._write_log_debug_progress = parent._write_log_debug_progress
 
         self._is_running = False
         self.ssrc_and_tg_id: bidict[int, int] = bidict()
         self._sender_task: asyncio.Task[None] | None = None
-        self._silence_detector_task: asyncio.Task[None] | None = None
+        self._latest_frame_detector_task: asyncio.Task[None] | None = None
         self._participants_monitor_task: asyncio.Task[None] | None = None
         self._process_pcm_locks: dict[int, asyncio.Lock] = {}
         self._upload_files_workers: list[asyncio.Task[None]] | None = None
@@ -71,7 +71,7 @@ class RecorderWorker:
         self._pcm_buffers_sizes: dict[int, int] = {}
         self._pcm_buffers_locks: dict[int, asyncio.Lock] = {}
         self._pcm_silent_frames_size: dict[int, int] = {}
-        self._pcm_latest_nonsilent_frame_time: dict[int, float] = {}
+        self._pcm_latest_frame_receive_time: dict[int, float] = {}
 
     @property
     def is_running(self) -> bool:
@@ -203,10 +203,19 @@ class RecorderWorker:
 
         self._log_info(user_id, f"RPC to file upload inserted into queue with:   File ID = {file_id} | Is big = {is_big}")
 
-    async def _process_pcm_buffer(self, user_id: int) -> None:
+    async def _process_pcm_buffer(self, user_id: int, read_max_size: int | None=None) -> None:
         async with self._pcm_buffers_locks[user_id]:
             pcm_buffer = self._pcm_buffers[user_id]
-            pcm_data = pcm_buffer.getvalue()
+
+            if read_max_size:
+                if read_max_size < 0:
+                    read_max_size = pcm_buffer.tell() + read_max_size + 1
+
+                pcm_data = pcm_buffer.read(read_max_size)
+
+            else:
+                pcm_data = pcm_buffer.getvalue()
+
             pcm_data_len = len(pcm_data)
             pcm_buffer.seek(0)
             pcm_buffer.truncate()
@@ -253,15 +262,18 @@ class RecorderWorker:
                     self._pcm_buffers_sizes[user_id] = 0
                     self._pcm_buffers_locks[user_id] = asyncio.Lock()
                     self._pcm_silent_frames_size[user_id] = 0
-                    self._pcm_latest_nonsilent_frame_time[user_id] = time()
+                    self._pcm_latest_frame_receive_time[user_id] = 0
 
                 chunk_len = len(chunk)
 
-                if self._is_pcm_silent(chunk):
+                is_pcm_silent = self._is_pcm_silent(chunk)
+
+                if is_pcm_silent:
                     self._pcm_silent_frames_size[user_id] += chunk_len
-                elif self._pcm_silent_frames_size[user_id] > 0:
+                else:
                     self._pcm_silent_frames_size[user_id] = 0
-                    self._pcm_latest_nonsilent_frame_time[user_id] = time()
+
+                self._pcm_latest_frame_receive_time[user_id] = time()
 
                 if self._write_log_debug_progress:
                     progress = self._pcm_buffers_sizes[user_id] / self._pcm_max_duration_in_size * 100
@@ -281,9 +293,9 @@ class RecorderWorker:
                     else:
                         self._log_info(user_id, "Silence detected, processing buffer")
 
-                    if self._pcm_buffers_sizes[user_id] == 0:
+                    if self._pcm_buffers_sizes[user_id] == 0 and not is_pcm_silent:
                         raise ValueError("Received chunk size is too big, so buffer is empty")
-
+                    self._log_info(user_id, f"Silent frames size: {self._pcm_silent_frames_size[user_id]}")
                     await self._process_pcm_buffer(user_id)
 
                     if not is_size_enough:
@@ -294,7 +306,8 @@ class RecorderWorker:
                     else:
                         self._pcm_buffers[user_id] = BytesIO()
                         self._pcm_buffers_sizes[user_id] = 0
-                        self._pcm_silent_frames_size[user_id] = 0
+
+                    self._pcm_silent_frames_size[user_id] = 0
 
             for user_id in self._pcm_buffers.keys():
                 await self._process_pcm_buffer(user_id)
@@ -313,13 +326,13 @@ class RecorderWorker:
 
         await self._pcm_frame_queue.put((user_id, frame.frame))
 
-    async def _silence_detector(self) -> None:
+    async def _latest_frame_detector(self) -> None:
         while self._is_running:
             await asyncio.sleep(1)
 
-            for user_id in self._pcm_buffers.copy().keys():
-                if time() - self._pcm_latest_nonsilent_frame_time[user_id] > self._silence_detector_duration:
-                    self._log_info(user_id, "Silence detector triggered (no non-silent frames for a while)")
+            for user_id in list(self._pcm_buffers.keys()):
+                if time() - self._pcm_latest_frame_receive_time[user_id] > self._latest_frame_detector_duration:
+                    self._log_info(user_id, "Latest frame detector triggered")
 
                     await self._process_pcm_buffer(user_id)
 
@@ -327,7 +340,7 @@ class RecorderWorker:
                     del self._pcm_buffers_sizes[user_id]
                     del self._pcm_buffers_locks[user_id]
                     del self._pcm_silent_frames_size[user_id]
-                    del self._pcm_latest_nonsilent_frame_time[user_id]
+                    del self._pcm_latest_frame_receive_time[user_id]
 
     async def _participants_monitor(self) -> None:
         while self._is_running:
@@ -381,7 +394,7 @@ class RecorderWorker:
         await self._app_file_session.start()
 
         self._sender_task = asyncio.create_task(self._wrapper_logger(self._sender()))
-        self._silence_detector_task = asyncio.create_task(self._wrapper_logger(self._silence_detector()))
+        self._latest_frame_detector_task = asyncio.create_task(self._wrapper_logger(self._latest_frame_detector()))
         self._participants_monitor_task = asyncio.create_task(self._wrapper_logger(self._participants_monitor()))
 
         self._current_file_workers = [
@@ -404,8 +417,8 @@ class RecorderWorker:
         if self._sender_task:
             await self._sender_task
 
-        if self._silence_detector_task:
-            await self._silence_detector_task
+        if self._latest_frame_detector_task:
+            await self._latest_frame_detector_task
 
         if self._participants_monitor_task:
             await self._participants_monitor_task

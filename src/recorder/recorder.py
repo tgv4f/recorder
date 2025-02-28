@@ -1,7 +1,7 @@
 from pyrogram.client import Client
 from pyrogram.raw.base.input_peer import InputPeer
 from pytgcalls import PyTgCalls, exceptions as calls_exceptions
-from pytgcalls.types import RecordStream, GroupCallParticipant, UpdatedGroupCallParticipant, AudioQuality, Frame
+from pytgcalls.types import RecordStream, GroupCallParticipant, UpdatedGroupCallParticipant, AudioQuality, Frame, GroupCallConfig
 
 from logging import Logger
 
@@ -18,7 +18,7 @@ class RecorderPy:
         max_duration: float = 15.,
         silence_duration: float = 3.,
         silence_threshold: float = 0.01,
-        silence_detector_duration: float = 5.,
+        latest_frame_detector_duration: float = 5.,
         upload_files_workers_count: int = 1,
         write_log_debug_progress: bool = False
     ):
@@ -41,7 +41,7 @@ class RecorderPy:
         self._pcm_max_duration_in_size = int(self._channel_second_rate * max_duration)
         self._pcm_silence_duration_in_size = int(self._channel_second_rate * silence_duration)
         self._silence_threshold = silence_threshold
-        self._silence_detector_duration = silence_detector_duration
+        self._latest_frame_detector_duration = latest_frame_detector_duration
         self._upload_files_workers_count = upload_files_workers_count
         self._write_log_debug_progress = write_log_debug_progress
 
@@ -81,14 +81,20 @@ class RecorderPy:
 
         await self.worker.process_pcm_frame(frame)
 
-    async def start(self, listen_chat_id: int, send_to_chat_peer: InputPeer, to_listen_user_ids: typing.Collection[int] | None=None) -> None:
+    async def start(
+        self,
+        listen_chat_id: int,
+        send_to_chat_peer: InputPeer,
+        join_as_peer: InputPeer | None = None,
+        to_listen_user_ids: typing.Collection[int] | None = None
+    ) -> None:
         if self._is_running:
             return
 
         self._logger.info("Starting recorder...")
 
         self._is_running = True
-        self._app_user_id = (await self._app.get_me()).id  # type: ignore
+        self._app_user_id = self._app.me.id  # type: ignore
 
         from .worker import RecorderWorker
 
@@ -115,6 +121,9 @@ class RecorderPy:
                 audio_parameters = self._quality,
                 camera = False,
                 screen = False
+            ),
+            config = GroupCallConfig(
+                join_as = join_as_peer
             )
         )
 

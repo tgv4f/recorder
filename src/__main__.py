@@ -5,11 +5,16 @@ from pyrogram.raw.base.input_peer import InputPeer
 from pytgcalls import PyTgCalls, filters as calls_filters, idle
 from pytgcalls.types import Direction, StreamFrames, UpdatedGroupCallParticipant, AudioQuality
 
+import re
 import typing
 
 from .recorder import RecorderPy
 
 from src import constants, utils, config
+
+
+COMMANDS_PREFIXES = "!"
+RECORD_COMMAND_REGEX = re.compile(r"^(?:\s+(?P<listen_chat_id>-|@?[a-zA-Z0-9_]{4,})(?:\s+(?P<join_as_id>@?[a-zA-Z0-9_]{4,}))?)?(?:\s*\n\s*(?P<to_listen_user_ids>(?:@?[a-zA-Z0-9_]{4,}\s*)*))?$")
 
 
 logger = utils.get_logger(
@@ -40,11 +45,6 @@ recorder_py = RecorderPy(
 
 
 SEND_TO_CHAT_PEER: InputPeer | None = None
-TO_LISTEN_USER_IDS: typing.Collection[int] | None = None
-
-
-PARTICIPANTS_SSRC_TO_TG_ID: dict[int, int] = {}
-RECORDER_MODELS: dict[int, RecorderPy] = {}
 
 
 async def _chat_id_filter(_, __, message: Message) -> bool:
@@ -53,52 +53,172 @@ async def _chat_id_filter(_, __, message: Message) -> bool:
 chat_id_filter = filters.create(_chat_id_filter)
 
 
-@app.on_message(chat_id_filter & filters.regex('!record'))
-async def play_handler(_: Client, message: Message):
+@typing.overload
+async def _resolve_chat_id(chat_id_str: int | str, as_peer: typing.Literal[False]=...) -> int: ...
+
+@typing.overload
+async def _resolve_chat_id(chat_id_str: int | str, as_peer: typing.Literal[True]) -> InputPeer: ...
+
+async def _resolve_chat_id(chat_id_str: int | str, as_peer: bool=False) -> int | InputPeer:
+    if isinstance(chat_id_str, str) and utils.is_int(chat_id_str):
+        return int(chat_id_str)
+
+    try:
+        chat_peer: InputPeer = await app.resolve_peer(chat_id_str)  # type: ignore
+
+    except Exception:
+        raise ValueError("A valid peer must be specified")
+
+    if as_peer:
+        return chat_peer
+
+    chat_id = getattr(chat_peer, "chat_id", None) or getattr(chat_peer, "channel_id", None)
+
+    if not chat_id:
+        raise ValueError("A valid ID must be specified")
+
+    return _fix_chat_id(chat_id)
+
+def _fix_chat_id(chat_id: int) -> int:
+    if chat_id > 0:
+        return -1 * (1000000000000 + chat_id)
+
+    return chat_id
+
+
+@app.on_message(chat_id_filter & filters.command("record", COMMANDS_PREFIXES))
+async def record_handler(_, message: Message):
+    """
+    Start recording voice chat.
+
+    The regex starts with `^!record` and optionally captures
+    `listen_chat_id` (which can be `-` or a username-like string of
+    at least 4 characters), followed by an optional `join_as_id`
+    (also at least 4 characters). If a newline is present, it
+    captures a space-separated list of `to_listen_user_ids`, ensuring
+    each entry is at least 4 characters long, and allows
+    optional leading/trailing spaces.
+
+    Examples:
+
+    `!record <listen_chat_id>\n<listen_user_id_1> <listen_user_id_2>`
+
+    `!record <listen_chat_id> <join_as_id>\n<listen_user_id_1> <listen_user_id_2>`
+
+    `!record - <join_as_id>`
+
+    `!record`
+    """
     global SEND_TO_CHAT_PEER
 
-    args = message.text.split(' ')[1:]
+    command_match = RECORD_COMMAND_REGEX.match(message.text[1 + 6:])  # skip prefix and command
 
-    if len(args) == 0:
-        chat_id = config.DEFAULT_LISTEN_CHAT_ID
-
-    elif len(args) != 1 or not utils.is_int(args[0]):
-        await message.reply_text("A valid Chat ID must be specified")
+    if not command_match:
+        await message.reply_text("Invalid command format")
 
         return
 
+    command_match_data = command_match.groupdict()
+
+    listen_chat_id_str = typing.cast(str | None, command_match_data.get("listen_chat_id"))
+    join_as_id_str = typing.cast(str | None, command_match_data.get("join_as_id"))
+    to_listen_user_ids_str = typing.cast(str | None, command_match_data.get("to_listen_user_ids"))
+
+    processing_message = await message.reply_text("Processing...")
+
+    if not listen_chat_id_str or listen_chat_id_str == "-":
+        listen_chat_id = config.DEFAULT_LISTEN_CHAT_ID
+
+        if not listen_chat_id:
+            await processing_message.delete()
+            await message.reply_text("Default listen chat ID is not set in config")
+
+            return
+
+        listen_chat_id = _fix_chat_id(listen_chat_id)
+
     else:
-        chat_id = int(args[0])
+        try:
+            listen_chat_id = await _resolve_chat_id(listen_chat_id_str)
+
+        except ValueError as ex:
+            await processing_message.delete()
+            await message.reply_text(f"Chat ID = {listen_chat_id_str!r}" + "\n" + ex.args[0])
+
+            return
+
+    join_as_peer: InputPeer | None = None
+
+    if join_as_id_str:
+        try:
+            join_as_peer = await _resolve_chat_id(join_as_id_str, as_peer=True)
+
+        except ValueError as ex:
+            await processing_message.delete()
+            await message.reply_text(f"Join as ID = {join_as_id_str!r}" + "\n" + ex.args[0])
+
+            return
+
+    to_listen_user_ids: list[int] = []
+
+    if to_listen_user_ids_str:
+        to_listen_user_ids_str_list = to_listen_user_ids_str.split()
+
+        for listen_user_id_str in to_listen_user_ids_str_list:
+            try:
+                listen_user_id = await _resolve_chat_id(listen_user_id_str)
+
+            except ValueError as ex:
+                await processing_message.delete()
+                await message.reply_text(f"Listen User ID = {listen_user_id_str!r}" + "\n" + ex.args[0])
+
+                return
+
+            to_listen_user_ids.append(listen_user_id)
 
     if recorder_py.is_running:
-        if recorder_py.worker and recorder_py.worker.listen_chat_id == chat_id:
-            await message.reply_text(f"Already recording in chat {chat_id}")
+        if recorder_py.worker and recorder_py.worker.listen_chat_id != listen_chat_id:
+            await processing_message.delete()
+            await message.reply_text(f"Already recording in chat {listen_chat_id}")
 
             return
 
         await recorder_py.stop()
 
     if not SEND_TO_CHAT_PEER:
-        SEND_TO_CHAT_PEER = await app.resolve_peer(config.SEND_TO_CHAT_ID)  # type: ignore
+        send_to_chat_id = config.SEND_TO_CHAT_ID
+
+        if not send_to_chat_id:
+            send_to_chat_id = message.chat.id
+
+        try:
+            SEND_TO_CHAT_PEER = await _resolve_chat_id(send_to_chat_id, as_peer=True)
+
+        except ValueError as ex:
+            await processing_message.delete()
+            await message.reply_text(f"Send to chat ID (config) = {send_to_chat_id!r}" + "\n" + ex.args[0])
+
+            return
 
     await recorder_py.start(
-        listen_chat_id = chat_id,
-        send_to_chat_peer = typing.cast(InputPeer, SEND_TO_CHAT_PEER),
-        to_listen_user_ids = TO_LISTEN_USER_IDS
+        listen_chat_id = listen_chat_id,
+        send_to_chat_peer = SEND_TO_CHAT_PEER,
+        join_as_peer = join_as_peer,
+        to_listen_user_ids = to_listen_user_ids
     )
 
-    await message.reply_text(f"Switched to listening to voice chat in chat {chat_id}")
+    await processing_message.delete()
+    await message.reply_text(f"Switched to listening to voice chat in chat {listen_chat_id}")
 
 
-@app.on_message(chat_id_filter & filters.regex('!leave'))
-async def leave_handler(_: Client, message: Message):
+@app.on_message(chat_id_filter & filters.command("leave", COMMANDS_PREFIXES))
+async def leave_handler(_, message: Message):
     await message.reply_text("Stopping recording...")
 
     await recorder_py.stop()
 
 
 @call_py.on_update(calls_filters.stream_frame(
-    # devices = Device.SPEAKER
     directions = Direction.INCOMING
 ))
 async def stream_audio_frame_handler(_, update: StreamFrames):
