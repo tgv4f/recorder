@@ -7,7 +7,7 @@ from pyrogram.raw.functions.upload.save_file_part import SaveFilePart
 from pyrogram.raw.types.input_file import InputFile
 from pyrogram.raw.functions.upload.save_big_file_part import SaveBigFilePart
 from pyrogram.raw.types.input_file_big import InputFileBig
-from pytgcalls.types import GroupCallParticipant, Frame
+from pytgcalls.types import AudioQuality, GroupCallParticipant, Frame, RecordStream, GroupCallConfig
 
 from io import BytesIO
 from bidict import bidict
@@ -36,14 +36,20 @@ class RecorderWorker:
     def __init__(
         self,
         parent: RecorderPy,
-        listen_chat_id: int,
+        join_chat_id: int,
+        quality: AudioQuality,
         send_to_chat_peer: InputPeer,
+        join_as_id: int,
+        join_as_peer: InputPeer | None = None,
         to_listen_user_ids: typing.Collection[int] | None = None,
         participants_monitor_interval: float = 3.,
         none_participants_timeout: float = 30.
     ):
-        self.listen_chat_id = listen_chat_id
+        self.join_chat_id = join_chat_id
+        self._quality = quality
         self._send_to_chat_peer = send_to_chat_peer
+        self._join_as_id = join_as_id
+        self._join_as_peer = join_as_peer
         self.to_listen_user_ids = to_listen_user_ids
         self._participants_monitor_interval = participants_monitor_interval
         self._none_participants_timeout = none_participants_timeout
@@ -51,7 +57,6 @@ class RecorderWorker:
         self._logger = parent._logger
         self._app = parent._app
         self._call_py = parent._call_py
-        self._app_user_id = parent._app_user_id
         self._channels = parent._channels
         self._sample_rate = parent._sample_rate
         self._channel_second_rate = parent._channel_second_rate
@@ -84,7 +89,7 @@ class RecorderWorker:
         return self._is_running
 
     def _get_log_pre_str(self, user_id: int | None) -> str:
-        return f"[{self.listen_chat_id}:{user_id or ''}]"
+        return f"[{self.join_chat_id}:{user_id or ''}]"
 
     def _log_debug(self, user_id: int | None, msg: typing.Any, **kwargs: typing.Any) -> None:
         self._logger.debug(f"{self._get_log_pre_str(user_id)} {msg}", **kwargs)
@@ -157,7 +162,7 @@ class RecorderWorker:
                     SendMedia(
                         peer = self._send_to_chat_peer,
                         media = media_subrpc,  # type: ignore
-                        message = f"{self.listen_chat_id} | {user_id}",
+                        message = f"{self.join_chat_id} | {user_id}",
                         random_id = self._app.rnd_id()
                     )
                 )
@@ -355,7 +360,7 @@ class RecorderWorker:
             try:
                 participants = typing.cast(
                     list[GroupCallParticipant],
-                    await self._call_py.get_participants(self.listen_chat_id)
+                    await self._call_py.get_participants(self.join_chat_id)
                 )
 
             except Exception as ex:
@@ -368,7 +373,7 @@ class RecorderWorker:
             for participant in participants:
                 user_id = participant.user_id
 
-                if user_id == self._app_user_id:
+                if user_id == self._join_as_id:
                     participants_count -= 1
 
                     continue
@@ -426,6 +431,19 @@ class RecorderWorker:
             asyncio.create_task(self._upload_files_worker())
             for _ in range(self._upload_files_workers_count)
         ]
+
+        await self._call_py.record(
+            chat_id = self.join_chat_id,
+            stream = RecordStream(
+                audio = True,
+                audio_parameters = self._quality,
+                camera = False,
+                screen = False
+            ),
+            config = GroupCallConfig(
+                join_as = self._join_as_peer
+            )
+        )
 
         self._log_info(None, "Worker session started")
 

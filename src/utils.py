@@ -1,3 +1,5 @@
+from pyrogram.client import Client
+from pyrogram.raw.base.input_peer import InputPeer
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from time import time
@@ -65,3 +67,53 @@ async def async_wrapper_logger(logger: logging.Logger, coro: typing.Awaitable[T]
         logger.exception("Error in async function", exc_info=ex)
 
     return None
+
+
+def extract_id_from_peer(peer: InputPeer) -> int | None:
+    return getattr(peer, "chat_id", None) or getattr(peer, "channel_id", None) or getattr(peer, "user_id", None)
+
+
+@typing.overload
+async def resolve_chat_id(
+    app: Client,
+    value: int | str,
+    as_peer: typing.Literal[False] = ...
+) -> int: ...
+
+@typing.overload
+async def resolve_chat_id(
+    app: Client,
+    value: int | str,
+    as_peer: typing.Literal[True]
+) -> InputPeer: ...
+
+async def resolve_chat_id(
+    app: Client,
+    value: int | str,
+    as_peer: bool = False
+) -> int | InputPeer:
+    if isinstance(value, str) and is_int(value):
+        value = int(value)
+
+    try:
+        chat_peer: InputPeer = await app.resolve_peer(value)  # type: ignore
+
+    except Exception:
+        raise ValueError("A valid peer must be specified")
+
+    if as_peer:
+        return chat_peer
+
+    chat_id = extract_id_from_peer(chat_peer)
+
+    if not chat_id:
+        raise ValueError("A valid ID must be specified")
+
+    return chat_id
+
+
+def fix_chat_id(chat_id: int) -> int:
+    if chat_id > 0:
+        return -1_000_000_000_000 - chat_id
+
+    return chat_id

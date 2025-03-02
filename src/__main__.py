@@ -15,7 +15,7 @@ from src.config import config
 
 COMMANDS_PREFIXES = "!"
 RECORD_COMMAND = "record"
-RECORD_COMMAND_PATTERN = re.compile(r"^(?:\s+(?P<listen_chat_id>-|@?[a-zA-Z0-9_]{4,})(?:\s+(?P<join_as_id>@?[a-zA-Z0-9_]{4,}))?)?(?:\s*\n\s*(?P<to_listen_user_ids>(?:@?[a-zA-Z0-9_]{4,}\s*)*))?$")
+RECORD_COMMAND_PATTERN = re.compile(r"^(?:\s+(?P<join_chat_id>-|@?[a-zA-Z0-9_]{4,})(?:\s+(?P<join_as_id>@?[a-zA-Z0-9_]{4,}))?)?(?:\s*\n\s*(?P<to_listen_user_ids>(?:@?[a-zA-Z0-9_]{4,}\s*)*))?$")
 
 
 logger = utils.get_logger(
@@ -57,49 +57,13 @@ async def _chat_id_filter(_: typing.Any, __: typing.Any, message: Message) -> bo
 chat_id_filter = filters.create(_chat_id_filter)
 
 
-def _extract_id_from_peer(peer: InputPeer) -> int | None:
-    return getattr(peer, "chat_id", None) or getattr(peer, "channel_id", None) or getattr(peer, "user_id", None)
-
-@typing.overload
-async def _resolve_chat_id(value: int | str, as_peer: typing.Literal[False]=...) -> int: ...
-
-@typing.overload
-async def _resolve_chat_id(value: int | str, as_peer: typing.Literal[True]) -> InputPeer: ...
-
-async def _resolve_chat_id(value: int | str, as_peer: bool=False) -> int | InputPeer:
-    if isinstance(value, str) and utils.is_int(value):
-        value = int(value)
-
-    try:
-        chat_peer: InputPeer = await app.resolve_peer(value)  # type: ignore
-
-    except Exception:
-        raise ValueError("A valid peer must be specified")
-
-    if as_peer:
-        return chat_peer
-
-    chat_id = _extract_id_from_peer(chat_peer)
-
-    if not chat_id:
-        raise ValueError("A valid ID must be specified")
-
-    return chat_id
-
-def _fix_chat_id(chat_id: int) -> int:
-    if chat_id > 0:
-        return -1_000_000_000_000 - chat_id
-
-    return chat_id
-
-
 @app.on_message(chat_id_filter & filters.command(RECORD_COMMAND, COMMANDS_PREFIXES))
 async def record_handler(_, message: Message):
     """
     Start recording voice chat.
 
     The regex starts with `^!record` and optionally captures
-    `listen_chat_id` (which can be `-` or a username-like string of
+    `join_chat_id` (which can be `-` or a username-like string of
     at least 4 characters), followed by an optional `join_as_id`
     (also at least 4 characters). If a newline is present, it
     captures a space-separated list of `to_listen_user_ids`, ensuring
@@ -108,9 +72,9 @@ async def record_handler(_, message: Message):
 
     Examples:
 
-    `!record <listen_chat_id>\n<listen_user_id_1> <listen_user_id_2>`
+    `!record <join_chat_id>\n<listen_user_id_1> <listen_user_id_2>`
 
-    `!record <listen_chat_id> <join_as_id>\n<listen_user_id_1> <listen_user_id_2>`
+    `!record <join_chat_id> <join_as_id>\n<listen_user_id_1> <listen_user_id_2>`
 
     `!record - <join_as_id>`
 
@@ -127,35 +91,35 @@ async def record_handler(_, message: Message):
 
     command_match_data: dict[str, str] = command_match.groupdict()
 
-    listen_chat_id_str = command_match_data.get("listen_chat_id")
+    join_chat_id_str = command_match_data.get("join_chat_id")
     join_as_id_str = command_match_data.get("join_as_id")
     to_listen_user_ids_str = command_match_data.get("to_listen_user_ids")
 
     processing_message = await message.reply_text("Processing...")
 
-    if not listen_chat_id_str or listen_chat_id_str == "-":
-        listen_chat_id = config.default_listen_chat_id or message.chat.id
+    if not join_chat_id_str or join_chat_id_str == "-":
+        join_chat_id = config.default_join_chat_id or message.chat.id
 
-        if isinstance(listen_chat_id, int):
-            listen_chat_id = _fix_chat_id(listen_chat_id)
+        if isinstance(join_chat_id, int):
+            join_chat_id = utils.fix_chat_id(join_chat_id)
 
         else:
             try:
-                listen_chat_id = _fix_chat_id(await _resolve_chat_id(listen_chat_id))
+                join_chat_id = utils.fix_chat_id(await utils.resolve_chat_id(app, join_chat_id))
 
             except ValueError as ex:
                 await processing_message.delete()
-                await message.reply_text(f"Listen chat ID (config) = {listen_chat_id!r}" + "\n" + ex.args[0])
+                await message.reply_text(f"Listen chat ID (config) = {join_chat_id!r}" + "\n" + ex.args[0])
 
-        listen_chat_id = typing.cast(int, listen_chat_id)
+        join_chat_id = typing.cast(int, join_chat_id)
 
     else:
         try:
-            listen_chat_id = _fix_chat_id(await _resolve_chat_id(listen_chat_id_str))
+            join_chat_id = utils.fix_chat_id(await utils.resolve_chat_id(app, join_chat_id_str))
 
         except ValueError as ex:
             await processing_message.delete()
-            await message.reply_text(f"Chat ID = {listen_chat_id_str!r}" + "\n" + ex.args[0])
+            await message.reply_text(f"Chat ID = {join_chat_id_str!r}" + "\n" + ex.args[0])
 
             return
 
@@ -163,7 +127,7 @@ async def record_handler(_, message: Message):
 
     if join_as_id_str:
         try:
-            join_as_peer = await _resolve_chat_id(join_as_id_str, as_peer=True)
+            join_as_peer = await utils.resolve_chat_id(app, join_as_id_str, as_peer=True)
 
         except ValueError as ex:
             await processing_message.delete()
@@ -178,7 +142,7 @@ async def record_handler(_, message: Message):
 
         for listen_user_id_str in to_listen_user_ids_str_list:
             try:
-                listen_user_id = await _resolve_chat_id(listen_user_id_str)
+                listen_user_id = await utils.resolve_chat_id(app, listen_user_id_str)
 
             except ValueError as ex:
                 await processing_message.delete()
@@ -189,9 +153,9 @@ async def record_handler(_, message: Message):
             to_listen_user_ids.append(listen_user_id)
 
     if recorder_py.is_running:
-        if recorder_py.listen_chat_id != listen_chat_id:
+        if recorder_py.join_chat_id != join_chat_id:
             await processing_message.delete()
-            await message.reply_text(f"Already recording in chat {listen_chat_id}")
+            await message.reply_text(f"Already recording in chat {join_chat_id}")
 
             return
 
@@ -201,7 +165,7 @@ async def record_handler(_, message: Message):
         send_to_chat_id = config.send_to_chat_id or message.chat.id
 
         try:
-            send_to_chat_peer = await _resolve_chat_id(send_to_chat_id, as_peer=True)
+            send_to_chat_peer = await utils.resolve_chat_id(app, send_to_chat_id, as_peer=True)
 
         except ValueError as ex:
             await processing_message.delete()
@@ -210,8 +174,14 @@ async def record_handler(_, message: Message):
             return
 
     await recorder_py.start(
-        listen_chat_id = listen_chat_id,
+        join_chat_id = join_chat_id,
         send_to_chat_peer = send_to_chat_peer,
+        join_as_id = (
+            utils.extract_id_from_peer(join_as_peer)
+            if join_as_peer
+            else
+            None
+        ),
         join_as_peer = join_as_peer,
         to_listen_user_ids = to_listen_user_ids
     )
@@ -219,8 +189,8 @@ async def record_handler(_, message: Message):
     await processing_message.delete()
 
     await message.reply_text((
-        f"Started listening voice chat of <code>{listen_chat_id}</code>\n"
-        f"""Joined as: {f"<code>{_fix_chat_id(typing.cast(int, _extract_id_from_peer(join_as_peer)))}</code>" if join_as_peer else "<b>self</b>"}\n"""
+        f"Started listening voice chat of <code>{join_chat_id}</code>\n"
+        f"""Joined as: {f"<code>{utils.fix_chat_id(typing.cast(int, utils.extract_id_from_peer(join_as_peer)))}</code>" if join_as_peer else "<b>self</b>"}\n"""
         f"""Listen user IDs: {f"<code>{', '.join(map(str, to_listen_user_ids))}</code>" if to_listen_user_ids else "<b>all</b>"}"""
     ))
 

@@ -1,7 +1,7 @@
 from pyrogram.client import Client
 from pyrogram.raw.base.input_peer import InputPeer
 from pytgcalls import PyTgCalls, exceptions as calls_exceptions
-from pytgcalls.types import RecordStream, GroupCallParticipant, UpdatedGroupCallParticipant, AudioQuality, Frame, GroupCallConfig
+from pytgcalls.types import GroupCallParticipant, UpdatedGroupCallParticipant, AudioQuality, Frame
 
 from logging import Logger
 
@@ -50,9 +50,9 @@ class RecorderPy:
         return self._is_running and bool(self.worker) and self.worker.is_running
 
     @property
-    def listen_chat_id(self) -> int | None:
+    def join_chat_id(self) -> int | None:
         if self.worker:
-            return self.worker.listen_chat_id
+            return self.worker.join_chat_id
 
         return None
 
@@ -90,8 +90,9 @@ class RecorderPy:
 
     async def start(
         self,
-        listen_chat_id: int,
+        join_chat_id: int,
         send_to_chat_peer: InputPeer,
+        join_as_id: int | None = None,
         join_as_peer: InputPeer | None = None,
         to_listen_user_ids: typing.Collection[int] | None = None
     ) -> None:
@@ -107,32 +108,22 @@ class RecorderPy:
 
         self.worker = RecorderWorker(
             parent = self,
-            listen_chat_id = listen_chat_id,
+            join_chat_id = join_chat_id,
+            quality = self._quality,
             send_to_chat_peer = send_to_chat_peer,
+            join_as_id = join_as_id or self._app_user_id,
+            join_as_peer = join_as_peer,
             to_listen_user_ids = to_listen_user_ids
         )
 
         for chat_id in (await self._call_py_binding.calls()).keys():  # type: ignore
             chat_id = typing.cast(int, chat_id)
 
-            if chat_id != listen_chat_id:
+            if chat_id != join_chat_id:
                 try:
                     await self._call_py.leave_call(chat_id)
                 except Exception as ex:
                     self._logger.exception(f"Error while leaving call with chat ID {chat_id}", exc_info=ex)
-
-        await self._call_py.record(
-            chat_id = listen_chat_id,
-            stream = RecordStream(
-                audio = True,
-                audio_parameters = self._quality,
-                camera = False,
-                screen = False
-            ),
-            config = GroupCallConfig(
-                join_as = join_as_peer
-            )
-        )
 
         await self.worker.start()
 
@@ -148,7 +139,7 @@ class RecorderPy:
 
         if self.worker:
             try:
-                await self._call_py.leave_call(self.worker.listen_chat_id)
+                await self._call_py.leave_call(self.worker.join_chat_id)
             except calls_exceptions.NoActiveGroupCall:
                 pass
 
