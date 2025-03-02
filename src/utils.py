@@ -1,5 +1,6 @@
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from time import time
 
 import logging
 import typing
@@ -50,6 +51,10 @@ def get_logger(name: str, filepath: Path, console_log_level: int=logging.INFO, f
 
 def is_int(value: str) -> bool:
     return value.rstrip("-").isdigit()
+
+
+def get_timestamp_int() -> int:
+    return int(time())
 
 
 async def async_wrapper_logger(logger: logging.Logger, coro: typing.Awaitable[T]) -> T | None:

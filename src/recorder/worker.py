@@ -19,6 +19,7 @@ import soundfile as sf
 import asyncio
 import typing
 
+from src import utils
 from .recorder import RecorderPy
 
 
@@ -37,11 +38,15 @@ class RecorderWorker:
         parent: RecorderPy,
         listen_chat_id: int,
         send_to_chat_peer: InputPeer,
-        to_listen_user_ids: typing.Collection[int] | None = None
+        to_listen_user_ids: typing.Collection[int] | None = None,
+        participants_monitor_interval: float = 3.,
+        none_participants_timeout: float = 30.
     ):
         self.listen_chat_id = listen_chat_id
         self._send_to_chat_peer = send_to_chat_peer
         self.to_listen_user_ids = to_listen_user_ids
+        self._participants_monitor_interval = participants_monitor_interval
+        self._none_participants_timeout = none_participants_timeout
 
         self._logger = parent._logger
         self._app = parent._app
@@ -62,6 +67,7 @@ class RecorderWorker:
         self._sender_task: asyncio.Task[None] | None = None
         self._latest_frame_detector_task: asyncio.Task[None] | None = None
         self._participants_monitor_task: asyncio.Task[None] | None = None
+        self._none_participants_first_time = 0
         self._process_pcm_locks: dict[int, asyncio.Lock] = {}
         self._upload_files_workers: list[asyncio.Task[None]] | None = None
         self._upload_files_workers_rpc_queue: asyncio.Queue[tuple[SaveFilePart | SaveBigFilePart, InputFile | InputFileBig, float, int]] = asyncio.Queue()
@@ -344,7 +350,7 @@ class RecorderWorker:
 
     async def _participants_monitor(self) -> None:
         while self._is_running:
-            await asyncio.sleep(3)
+            await asyncio.sleep(self._participants_monitor_interval)
 
             try:
                 participants = typing.cast(
@@ -357,15 +363,34 @@ class RecorderWorker:
 
                 continue
 
+            participants_count = len(participants)
+
             for participant in participants:
                 user_id = participant.user_id
 
-                if user_id == self._app_user_id or (self.to_listen_user_ids and user_id not in self.to_listen_user_ids):
+                if user_id == self._app_user_id:
+                    participants_count -= 1
+
+                    continue
+
+                if self.to_listen_user_ids and user_id not in self.to_listen_user_ids:
                     continue
 
                 self.ssrc_and_tg_id.inverse[user_id] = participant.source
 
-            self._log_debug(None, f"Participants in chat {self.listen_chat_id}: {len(participants)}")
+            self._log_debug(None, f"""Participants in chat: {participants_count} (until shutdown: {(self._none_participants_timeout - (utils.get_timestamp_int() - self._none_participants_first_time)) if self._none_participants_first_time else f">{self._none_participants_timeout}"} seconds)""")
+
+            if participants_count != 0 or self._none_participants_first_time == 0:
+                self._none_participants_first_time = utils.get_timestamp_int()
+
+            elif utils.get_timestamp_int() - self._none_participants_first_time > self._none_participants_timeout:
+                self._log_debug(None, f"No participants in chat for a long time ({self._none_participants_timeout} seconds) - stopping worker")
+
+                self._participants_monitor_task = None
+
+                await self.stop()
+
+                break
 
     async def _wrapper_logger(self, coro: typing.Awaitable[T]) -> T | None:
         try:

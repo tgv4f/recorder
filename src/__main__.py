@@ -189,7 +189,7 @@ async def record_handler(_, message: Message):
             to_listen_user_ids.append(listen_user_id)
 
     if recorder_py.is_running:
-        if recorder_py.worker and recorder_py.worker.listen_chat_id != listen_chat_id:
+        if recorder_py.listen_chat_id != listen_chat_id:
             await processing_message.delete()
             await message.reply_text(f"Already recording in chat {listen_chat_id}")
 
@@ -220,7 +220,7 @@ async def record_handler(_, message: Message):
 
     await message.reply_text((
         f"Started listening voice chat of <code>{listen_chat_id}</code>\n"
-        f"""Join as: {f"<code>{_fix_chat_id(typing.cast(int, _extract_id_from_peer(join_as_peer)))}</code>" if join_as_peer else "<b>self</b>"}\n"""
+        f"""Joined as: {f"<code>{_fix_chat_id(typing.cast(int, _extract_id_from_peer(join_as_peer)))}</code>" if join_as_peer else "<b>self</b>"}\n"""
         f"""Listen user IDs: {f"<code>{', '.join(map(str, to_listen_user_ids))}</code>" if to_listen_user_ids else "<b>all</b>"}"""
     ))
 

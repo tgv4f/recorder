@@ -47,7 +47,14 @@ class RecorderPy:
 
     @property
     def is_running(self) -> bool:
-        return self._is_running
+        return self._is_running and bool(self.worker) and self.worker.is_running
+
+    @property
+    def listen_chat_id(self) -> int | None:
+        if self.worker:
+            return self.worker.listen_chat_id
+
+        return None
 
     async def _process_participant_joined(self, participant: GroupCallParticipant) -> None:
         if not self.worker or not self.worker.is_running or (self.worker.to_listen_user_ids and participant.user_id not in self.worker.to_listen_user_ids):
