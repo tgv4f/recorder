@@ -10,8 +10,8 @@ T = typing.TypeVar("T")
 class FrameDeviceEnum(Enum):
     # NOTE: format: DEVICE = (EXTENSION, MIME_TYPE)
     MICROPHONE = ("ogg", "audio/ogg")
-    CAMERA = ("webm", "video/webm")
-    SCREEN = ("webm", "video/webm")
+    CAMERA = ("h264", "video/h264")
+    # SCREEN = ("mp4", "video/mp4")
 
 
 CALLS_DEVICE_TO_FRAME_DEVICE = {

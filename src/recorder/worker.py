@@ -2,6 +2,7 @@ from pyrogram.raw.base.input_peer import InputPeer
 from pyrogram.session.session import Session
 from pyrogram.raw.types.input_media_uploaded_document import InputMediaUploadedDocument
 from pyrogram.raw.types.document_attribute_audio import DocumentAttributeAudio
+from pyrogram.raw.types.document_attribute_video import DocumentAttributeVideo
 from pyrogram.raw.functions.messages.send_media import SendMedia
 from pyrogram.raw.functions.upload.save_file_part import SaveFilePart
 from pyrogram.raw.types.input_file import InputFile
@@ -55,19 +56,22 @@ class RecorderWorker:
 
         return ogg_buffer.getvalue()
 
-    # TODO: fix type hinting for DEVICES_DATA_CONVERTERS and DEVICES_DURATION_PROCESSORS in callbacks
-
-    DEVICES_DATA_CONVERTERS: dict[FrameDeviceEnum, typing.Callable[[bytes], bytes]] = {
+    DEVICES_DATA_CONVERTERS: dict[FrameDeviceEnum, typing.Callable[["RecorderWorker", bytes], bytes]] = {
         FrameDeviceEnum.MICROPHONE: _convert_audio_pcm_to_ogg,  # type: ignore
         # TODO: camera and screen
     }
 
-    def _get_audio_pcm_duration(self, data: bytes) -> float:
+    def _get_audio_pcm_duration(self, device: FrameDeviceEnum, data: bytes) -> float:
         return len(data) / self._audio_channel_second_rate
 
-    DEVICES_DURATION_PROCESSORS: dict[FrameDeviceEnum, typing.Callable[[bytes], float]] = {
+    def _get_data_duration(self, recv_times: tuple[int, int]) -> float:
+        return (recv_times[1] - recv_times[0]) / 1_000_000
+
+    DEVICES_DURATION_PROCESSORS: dict[FrameDeviceEnum, typing.Callable[["RecorderWorker", bytes | tuple[int, int]], float]] = {
         FrameDeviceEnum.MICROPHONE: _get_audio_pcm_duration,  # type: ignore
         # TODO: camera and screen
+        FrameDeviceEnum.CAMERA: _get_data_duration,  # type: ignore
+        # FrameDeviceEnum.SCREEN: _get_data_duration  # type: ignore
     }
 
     def __init__(
@@ -99,6 +103,7 @@ class RecorderWorker:
         self._audio_channels = parent._audio_channels
         self._audio_sample_rate = parent._audio_sample_rate
         self._audio_channel_second_rate = parent._audio_channel_second_rate
+        self._max_durations = parent._max_durations
         self._audio_max_duration_in_size = parent._audio_max_duration_in_size
         self._audio_silence_duration_in_size = parent._audio_silence_duration_in_size
         self._silence_threshold = parent._silence_threshold
@@ -115,12 +120,13 @@ class RecorderWorker:
         self._upload_files_workers: list[asyncio.Task[None]] | None = None
         self._upload_files_workers_rpc_queue: asyncio.Queue[tuple[SaveFilePart | SaveBigFilePart, InputFile | InputFileBig, float, FrameDeviceEnum, int]] = asyncio.Queue()
         self._app_file_session: Session | None = None
-        self._data_frame_queue: asyncio.Queue[tuple[FrameDeviceEnum, int, bytes]] = asyncio.Queue()
+        self._data_frame_queue: asyncio.Queue[tuple[FrameDeviceEnum, int, int, bytes]] = asyncio.Queue()
         self._data_buffers: dict[FrameDeviceEnum, dict[int, BytesIO]] = generate_devices_enum_dict(None, dict)
         self._audio_buffers_sizes: dict[int, int] = {}
         self._data_buffers_locks: dict[FrameDeviceEnum, dict[int, asyncio.Lock]] = generate_devices_enum_dict(None, dict)
         self._audio_silent_frames_size: dict[int, int] = {}
         self._data_latest_frame_receive_time: dict[FrameDeviceEnum, dict[int, float]] = generate_devices_enum_dict(None, dict)
+        self._data_frames_durations: dict[FrameDeviceEnum, dict[int, tuple[int, int]]] = generate_devices_enum_dict(None, dict)
 
     @property
     def is_running(self) -> bool:
@@ -134,6 +140,9 @@ class RecorderWorker:
 
     def _log_info(self, user_id: int | None, msg: typing.Any, **kwargs: typing.Any) -> None:
         self._logger.info(f"{self._get_log_pre_str(user_id)} {msg}", **kwargs)
+
+    def _log_error(self, user_id: int | None, msg: typing.Any, **kwargs: typing.Any) -> None:
+        self._logger.error(f"{self._get_log_pre_str(user_id)} {msg}", **kwargs)
 
     def _log_exception(self, user_id: int | None, msg: typing.Any, ex: Exception, **kwargs: typing.Any) -> None:
         self._logger.exception(f"{self._get_log_pre_str(user_id)} {msg}", exc_info=ex, **kwargs)
@@ -164,9 +173,18 @@ class RecorderWorker:
                 mime_type = device.value[1],
                 file = file_subrpc,  # type: ignore
                 attributes = [
-                    DocumentAttributeAudio(  # type: ignore
-                        voice = True,
-                        duration = int(duration)
+                    (
+                        DocumentAttributeAudio(  # type: ignore
+                            voice = True,
+                            duration = int(duration)
+                        )
+                        if device is FrameDeviceEnum.MICROPHONE
+                        else
+                        DocumentAttributeVideo(  # type: ignore
+                            duration = int(duration),
+                            w = 1280,
+                            h = 720
+                        )
                     )
                 ]
             )
@@ -248,19 +266,24 @@ class RecorderWorker:
             if data_bytes_len == 0:
                 return
 
-            processed_data_bytes = self.DEVICES_DATA_CONVERTERS[device](data_bytes)
+            processed_data_bytes = self.DEVICES_DATA_CONVERTERS[device](self, data_bytes)
             processed_data_bytes_len = len(processed_data_bytes)
 
             self._log_info(user_id, f"Data converted to {device.value[0]} | DATA {data_bytes_len} => {device.value[0]} {processed_data_bytes_len}")
 
             await self._upload_file(
                 processed_data_bytes,
-                self.DEVICES_DURATION_PROCESSORS[device](processed_data_bytes),
+                (
+                    self._get_audio_pcm_duration(device, data_bytes)
+                    if device is FrameDeviceEnum.MICROPHONE
+                    else
+                    self.DEVICES_DURATION_PROCESSORS[device](self, self._data_frames_durations[device][user_id])
+                ),
                 device,
                 user_id
             )
 
-    def _is_pcm_silent(self, pcm_data: bytes) -> bool:
+    def _is_audio_pcm_silent(self, pcm_data: bytes) -> bool:
         buffer = np.frombuffer(pcm_data, dtype=np.int16)
 
         if self._audio_channels > 1:
@@ -274,7 +297,7 @@ class RecorderWorker:
     async def _sender(self) -> None:
         while self._is_running:
             try:
-                device, user_id, chunk = await asyncio.wait_for(
+                device, user_id, recv_time, chunk = await asyncio.wait_for(
                     self._data_frame_queue.get(),
                     timeout = 0.1
                 )
@@ -290,13 +313,20 @@ class RecorderWorker:
                 if device is FrameDeviceEnum.MICROPHONE:
                     self._audio_buffers_sizes[user_id] = 0
                     self._audio_silent_frames_size[user_id] = 0
+                else:
+                    self._data_frames_durations[device][user_id] = (recv_time, recv_time)
+
+            elif device is not FrameDeviceEnum.MICROPHONE:
+                frist_recv_time = self._data_frames_durations[device][user_id][0]
+
+                self._data_frames_durations[device][user_id] = (frist_recv_time, recv_time)
 
             chunk_len = len(chunk)
 
             if device is FrameDeviceEnum.MICROPHONE:
-                is_pcm_silent = self._is_pcm_silent(chunk)
+                is_audio_pcm_silent = self._is_audio_pcm_silent(chunk)
 
-                if is_pcm_silent:
+                if is_audio_pcm_silent:
                     self._audio_silent_frames_size[user_id] += chunk_len
                 else:
                     self._audio_silent_frames_size[user_id] = 0
@@ -308,45 +338,45 @@ class RecorderWorker:
                     progress = self._audio_buffers_sizes[user_id] / self._audio_max_duration_in_size * 100
                     self._log_debug(user_id, f"Current PCM buffer status: {self._audio_buffers_sizes[user_id]} bytes | {progress:.5f} %")
 
-                else:
-                    self._log_debug(user_id, f"Current PCM buffer status: {self._audio_buffers_sizes[user_id]} bytes | duration {self._audio_buffers_sizes[user_id] / self._audio_channel_second_rate:.5f} seconds")
+                # else:
+                #     self._log_debug(user_id, f"Current PCM buffer status: {self._data_buffers_s[device][user_id]} bytes | duration {self.DEVICES_DURATION_PROCESSORS[device](self, chunk):.5f} seconds")
 
-            is_duration_enough = (
+            is_duration_enough_to_write = (
                 self._audio_buffers_sizes[user_id] + chunk_len <= self._audio_max_duration_in_size
                 if device is FrameDeviceEnum.MICROPHONE
                 else
-                True  # TODO: calculate for camera and screen
+                self.DEVICES_DURATION_PROCESSORS[device](self, chunk) <= self._max_durations[device]
             )
 
-            is_silence_enough = (
+            is_audio_silence_enough_to_write = (
                 self._audio_silent_frames_size[user_id] >= self._audio_silence_duration_in_size
                 if device is FrameDeviceEnum.MICROPHONE
                 else
                 False
             )
 
-            if is_duration_enough:
+            if is_duration_enough_to_write:
                 self._data_buffers[device][user_id].write(chunk)
 
                 if device is FrameDeviceEnum.MICROPHONE:
                     self._audio_buffers_sizes[user_id] += chunk_len
 
-            if not is_duration_enough or is_silence_enough:
-                if not is_duration_enough:
+            if not is_duration_enough_to_write or is_audio_silence_enough_to_write:
+                if not is_duration_enough_to_write:
                     self._log_info(user_id, "Buffer is full, processing buffer")
 
                 else:
-                    self._log_info(user_id, "Silence detected, processing buffer")
+                    self._log_info(user_id, "Audio silence detected, processing buffer")
 
                 if device is FrameDeviceEnum.MICROPHONE:
-                    if self._audio_buffers_sizes[user_id] == 0 and not is_pcm_silent:  # type: ignore
+                    if self._audio_buffers_sizes[user_id] == 0 and not is_audio_pcm_silent:  # type: ignore
                         raise ValueError("Received audio chunk size is too big, so buffer is empty")
 
-                    self._log_debug(user_id, f"Silent frames size: {self._audio_silent_frames_size[user_id]}")
+                    self._log_debug(user_id, f"Audio silent frames size: {self._audio_silent_frames_size[user_id]}")
 
                 await self._process_data_buffer(device, user_id)
 
-                if not is_duration_enough:
+                if not is_duration_enough_to_write:
                     self._data_buffers[device][user_id] = BytesIO(chunk)
                     self._data_buffers[device][user_id].seek(chunk_len)
 
@@ -375,7 +405,8 @@ class RecorderWorker:
         device = CALLS_DEVICE_TO_FRAME_DEVICE.get(update.device, None)
 
         if not device:
-            self._log_debug(None, f"Unknown device: {update.device}")
+            self._log_error(None, f"Unknown device: {update.device}")
+
             return
 
         for frame in update.frames:
@@ -383,10 +414,9 @@ class RecorderWorker:
             user_id = self.ssrc_and_tg_id[device].get(ssrc, None)
 
             if not user_id:
-                self._log_debug(user_id, f"Unknown user ID for SSRC: {ssrc}")
                 return
 
-            await self._data_frame_queue.put((device, user_id, frame.frame))
+            await self._data_frame_queue.put((device, user_id, frame.info.capture_time, frame.frame))
 
     async def _latest_frame_detector(self) -> None:
         while self._is_running:

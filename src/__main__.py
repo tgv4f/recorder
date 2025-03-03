@@ -56,7 +56,10 @@ async def _chat_id_filter(_: typing.Any, __: typing.Any, message: Message) -> bo
     if isinstance(config.control_chat_id, int):
         return message.chat.id == config.control_chat_id
 
-    return message.chat.username.lower() == config.control_chat_id
+    if message.chat.username:
+        return message.chat.username.lower() == config.control_chat_id
+
+    return False
 
 chat_id_filter = filters.create(_chat_id_filter)
 
