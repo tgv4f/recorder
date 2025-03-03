@@ -61,18 +61,11 @@ class RecorderWorker:
         # TODO: camera and screen
     }
 
-    def _get_audio_pcm_duration(self, device: FrameDeviceEnum, data: bytes) -> float:
+    def _get_audio_pcm_duration(self, data: bytes) -> float:
         return len(data) / self._audio_channel_second_rate
 
     def _get_data_duration(self, recv_times: tuple[int, int]) -> float:
         return (recv_times[1] - recv_times[0]) / 1_000_000
-
-    DEVICES_DURATION_PROCESSORS: dict[FrameDeviceEnum, typing.Callable[["RecorderWorker", bytes | tuple[int, int]], float]] = {
-        FrameDeviceEnum.MICROPHONE: _get_audio_pcm_duration,  # type: ignore
-        # TODO: camera and screen
-        FrameDeviceEnum.CAMERA: _get_data_duration,  # type: ignore
-        # FrameDeviceEnum.SCREEN: _get_data_duration  # type: ignore
-    }
 
     def __init__(
         self,
@@ -274,10 +267,10 @@ class RecorderWorker:
             await self._upload_file(
                 processed_data_bytes,
                 (
-                    self._get_audio_pcm_duration(device, data_bytes)
+                    self._get_audio_pcm_duration(data_bytes)
                     if device is FrameDeviceEnum.MICROPHONE
                     else
-                    self.DEVICES_DURATION_PROCESSORS[device](self, self._data_frames_durations[device][user_id])
+                    self._get_data_duration(self._data_frames_durations[device][user_id])
                 ),
                 device,
                 user_id
@@ -345,7 +338,7 @@ class RecorderWorker:
                 self._audio_buffers_sizes[user_id] + chunk_len <= self._audio_max_duration_in_size
                 if device is FrameDeviceEnum.MICROPHONE
                 else
-                self.DEVICES_DURATION_PROCESSORS[device](self, chunk) <= self._max_durations[device]
+                self._get_data_duration(self._data_frames_durations[device][user_id]) <= self._max_durations[device]
             )
 
             is_audio_silence_enough_to_write = (
@@ -434,8 +427,11 @@ class RecorderWorker:
                         del self._data_latest_frame_receive_time[device][user_id]
 
                         if device is FrameDeviceEnum.MICROPHONE:
-                            self._audio_buffers_sizes[user_id] = 0
-                            self._audio_silent_frames_size[user_id] = 0
+                            del self._audio_buffers_sizes[user_id]
+                            del self._audio_silent_frames_size[user_id]
+
+                        else:
+                            del self._data_frames_durations[device][user_id]
 
         self._log_debug(None, "Latest frame detector task finished")
 
