@@ -1,11 +1,13 @@
 from pyrogram.client import Client
 from pyrogram.raw.base.input_peer import InputPeer
 from pytgcalls import PyTgCalls, exceptions as calls_exceptions
-from pytgcalls.types import GroupCallParticipant, UpdatedGroupCallParticipant, AudioQuality, Frame
+from pytgcalls.types import GroupCallParticipant, UpdatedGroupCallParticipant, AudioQuality, StreamFrames
 
 from logging import Logger
 
 import typing
+
+from .enums import FrameDeviceEnum, generate_devices_enum_dict
 
 
 class RecorderPy:
@@ -14,19 +16,22 @@ class RecorderPy:
         logger: Logger,
         app: Client,
         call_py: PyTgCalls,
-        quality: AudioQuality,
-        max_duration: float = 15.,
+        audio_quality: AudioQuality,
+        max_durations: dict[FrameDeviceEnum, float] = generate_devices_enum_dict(15.),
         silence_duration: float = 3.,
         silence_threshold: float = 0.01,
         latest_frame_detector_duration: float = 5.,
         upload_files_workers_count: int = 1,
         write_log_debug_progress: bool = False
     ):
+        if not max_durations:
+            raise ValueError("max_durations must not be empty")
+
         self._logger = logger
         self._app = app
         self._call_py = call_py
         self._call_py_binding = call_py._binding
-        self._quality = quality
+        self._audio_quality = audio_quality
 
         from .worker import RecorderWorker
 
@@ -34,12 +39,12 @@ class RecorderPy:
         self.worker: RecorderWorker | None = None
 
         self._app_user_id: int | None = None
-        self._sample_rate = quality.value[0]
-        self._channels = quality.value[1]
-        self._channel_second_rate = self._sample_rate * self._channels * 2
-        self._max_duration = max_duration
-        self._pcm_max_duration_in_size = int(self._channel_second_rate * max_duration)
-        self._pcm_silence_duration_in_size = int(self._channel_second_rate * silence_duration)
+        self._audio_sample_rate = audio_quality.value[0]
+        self._audio_channels = audio_quality.value[1]
+        self._audio_channel_second_rate = self._audio_sample_rate * self._audio_channels * 2
+        self._max_durations = max_durations
+        self._audio_max_duration_in_size: int = int(self._audio_channel_second_rate * max_durations[FrameDeviceEnum.MICROPHONE])
+        self._audio_silence_duration_in_size = int(self._audio_channel_second_rate * silence_duration)
         self._silence_threshold = silence_threshold
         self._latest_frame_detector_duration = latest_frame_detector_duration
         self._upload_files_workers_count = upload_files_workers_count
@@ -60,7 +65,7 @@ class RecorderPy:
         if not self.worker or not self.worker.is_running or (self.worker.to_listen_user_ids and participant.user_id not in self.worker.to_listen_user_ids):
             return
 
-        self.worker.ssrc_and_tg_id.inverse[participant.user_id] = participant.source
+        self.worker._process_participant_joined(participant)
 
     async def _process_participant_left_me(self) -> None:
         await self.stop()
@@ -82,11 +87,11 @@ class RecorderPy:
         elif participant.action == GroupCallParticipant.Action.LEFT:
             await self._process_participant_left(participant)
 
-    async def process_pcm_frame(self, frame: Frame) -> None:
+    async def process_stream_frames_update(self, update: StreamFrames) -> None:
         if not self._is_running or not self.worker or not self.worker.is_running:
             return
 
-        await self.worker.process_pcm_frame(frame)
+        await self.worker.process_stream_frames_update(update)
 
     async def start(
         self,
@@ -101,6 +106,8 @@ class RecorderPy:
 
         self._logger.info("Starting recorder...")
 
+        self._call_py_binding.enable_h264_encoder(True)
+
         self._is_running = True
         self._app_user_id = self._app.me.id  # type: ignore
 
@@ -109,7 +116,7 @@ class RecorderPy:
         self.worker = RecorderWorker(
             parent = self,
             join_chat_id = join_chat_id,
-            quality = self._quality,
+            audio_quality = self._audio_quality,
             send_to_chat_peer = send_to_chat_peer,
             join_as_id = join_as_id or self._app_user_id,
             join_as_peer = join_as_peer,

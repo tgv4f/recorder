@@ -9,7 +9,7 @@ import re
 import typing
 
 from src import constants, utils
-from src.recorder import RecorderPy
+from src.recorder import RecorderPy, FrameDeviceEnum
 from src.config import config
 
 
@@ -40,7 +40,11 @@ recorder_py = RecorderPy(
     logger = logger,
     app = app,
     call_py = call_py,
-    quality = AudioQuality.HIGH,
+    audio_quality = AudioQuality.HIGH,
+    max_durations = {
+        FrameDeviceEnum.MICROPHONE: 15.,
+        FrameDeviceEnum.CAMERA: 10.,
+    },
     write_log_debug_progress = True
 )
 
@@ -210,8 +214,7 @@ async def leave_handler(_, message: Message):
     directions = Direction.INCOMING
 ))
 async def stream_audio_frame_handler(_, update: StreamFrames):
-    for frame in update.frames:
-        await recorder_py.process_pcm_frame(frame)
+    await recorder_py.process_stream_frames_update(update)
 
 
 @call_py.on_update(calls_filters.call_participant())

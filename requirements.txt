@@ -4,6 +4,6 @@ soundfile==0.13.1
 typing_extensions>=4.12.2
 Pyrogram==2.0.106
 TgCrypto==1.2.5
-git+https://github.com/tgv4f/pytgcalls.git@c5fb139cf381ec3283e892d9c9301d388add1eef
+git+https://github.com/tgv4f/pytgcalls.git@0d211c0fdb7fb01ef7987e5aa72f06169f941d4a
 pydantic==2.10.6
 pyyaml==6.0.2

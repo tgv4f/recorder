@@ -7,7 +7,7 @@ from pyrogram.raw.functions.upload.save_file_part import SaveFilePart
 from pyrogram.raw.types.input_file import InputFile
 from pyrogram.raw.functions.upload.save_big_file_part import SaveBigFilePart
 from pyrogram.raw.types.input_file_big import InputFileBig
-from pytgcalls.types import AudioQuality, GroupCallParticipant, Frame, RecordStream, GroupCallConfig
+from pytgcalls.types import AudioQuality, GroupCallParticipant, StreamFrames, RecordStream, GroupCallConfig
 
 from io import BytesIO
 from bidict import bidict
@@ -21,10 +21,8 @@ import typing
 
 from src import utils
 from .recorder import RecorderPy
+from .enums import FrameDeviceEnum, CALLS_DEVICE_TO_FRAME_DEVICE, generate_devices_enum_dict
 
-
-FILE_EXT = "ogg"
-FILE_MIME_TYPE = "audio/ogg"
 
 NOT_BIG_MAX_FILE_SIZE = 10 * 1024 * 1024
 
@@ -33,56 +31,96 @@ T = typing.TypeVar("T")
 
 
 class RecorderWorker:
+    def _convert_audio_pcm_to_ogg(self, data: bytes) -> bytes:
+        """
+        Convert raw audio PCM bytes to OGG/OPUS.
+        """
+        if not data:
+            return b""
+
+        audio_data = np.frombuffer(data, dtype=np.int16)
+
+        if self._audio_channels > 1:
+            audio_data = audio_data.reshape(-1, self._audio_channels)
+
+        ogg_buffer = BytesIO()
+
+        sf.write(
+            file = ogg_buffer,
+            data = audio_data,
+            samplerate = self._audio_sample_rate,
+            format = "OGG",
+            subtype = "OPUS"
+        )
+
+        return ogg_buffer.getvalue()
+
+    # TODO: fix type hinting for DEVICES_DATA_CONVERTERS and DEVICES_DURATION_PROCESSORS in callbacks
+
+    DEVICES_DATA_CONVERTERS: dict[FrameDeviceEnum, typing.Callable[[bytes], bytes]] = {
+        FrameDeviceEnum.MICROPHONE: _convert_audio_pcm_to_ogg,  # type: ignore
+        # TODO: camera and screen
+    }
+
+    def _get_audio_pcm_duration(self, data: bytes) -> float:
+        return len(data) / self._audio_channel_second_rate
+
+    DEVICES_DURATION_PROCESSORS: dict[FrameDeviceEnum, typing.Callable[[bytes], float]] = {
+        FrameDeviceEnum.MICROPHONE: _get_audio_pcm_duration,  # type: ignore
+        # TODO: camera and screen
+    }
+
     def __init__(
         self,
         parent: RecorderPy,
         join_chat_id: int,
-        quality: AudioQuality,
+        audio_quality: AudioQuality,
         send_to_chat_peer: InputPeer,
         join_as_id: int,
         join_as_peer: InputPeer | None = None,
         to_listen_user_ids: typing.Collection[int] | None = None,
+        latest_frame_detector_interval: float = 1.,
         participants_monitor_interval: float = 3.,
         none_participants_timeout: float = 30.
     ):
         self.join_chat_id = join_chat_id
-        self._quality = quality
+        self._audio_quality = audio_quality
         self._send_to_chat_peer = send_to_chat_peer
         self._join_as_id = join_as_id
         self._join_as_peer = join_as_peer
         self.to_listen_user_ids = to_listen_user_ids
+        self._latest_frame_detector_interval = latest_frame_detector_interval
         self._participants_monitor_interval = participants_monitor_interval
         self._none_participants_timeout = none_participants_timeout
 
         self._logger = parent._logger
         self._app = parent._app
         self._call_py = parent._call_py
-        self._channels = parent._channels
-        self._sample_rate = parent._sample_rate
-        self._channel_second_rate = parent._channel_second_rate
-        self._pcm_max_duration_in_size = parent._pcm_max_duration_in_size
-        self._pcm_silence_duration_in_size = parent._pcm_silence_duration_in_size
+        self._audio_channels = parent._audio_channels
+        self._audio_sample_rate = parent._audio_sample_rate
+        self._audio_channel_second_rate = parent._audio_channel_second_rate
+        self._audio_max_duration_in_size = parent._audio_max_duration_in_size
+        self._audio_silence_duration_in_size = parent._audio_silence_duration_in_size
         self._silence_threshold = parent._silence_threshold
         self._latest_frame_detector_duration = parent._latest_frame_detector_duration
         self._upload_files_workers_count = parent._upload_files_workers_count
         self._write_log_debug_progress = parent._write_log_debug_progress
 
         self._is_running = False
-        self.ssrc_and_tg_id: bidict[int, int] = bidict()
+        self.ssrc_and_tg_id: dict[FrameDeviceEnum, bidict[int, int]] = generate_devices_enum_dict(None, bidict)
         self._sender_task: asyncio.Task[None] | None = None
         self._latest_frame_detector_task: asyncio.Task[None] | None = None
         self._participants_monitor_task: asyncio.Task[None] | None = None
         self._none_participants_first_time = 0
-        self._process_pcm_locks: dict[int, asyncio.Lock] = {}
         self._upload_files_workers: list[asyncio.Task[None]] | None = None
-        self._upload_files_workers_rpc_queue: asyncio.Queue[tuple[SaveFilePart | SaveBigFilePart, InputFile | InputFileBig, float, int]] = asyncio.Queue()
+        self._upload_files_workers_rpc_queue: asyncio.Queue[tuple[SaveFilePart | SaveBigFilePart, InputFile | InputFileBig, float, FrameDeviceEnum, int]] = asyncio.Queue()
         self._app_file_session: Session | None = None
-        self._pcm_frame_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
-        self._pcm_buffers: dict[int, BytesIO] = {}
-        self._pcm_buffers_sizes: dict[int, int] = {}
-        self._pcm_buffers_locks: dict[int, asyncio.Lock] = {}
-        self._pcm_silent_frames_size: dict[int, int] = {}
-        self._pcm_latest_frame_receive_time: dict[int, float] = {}
+        self._data_frame_queue: asyncio.Queue[tuple[FrameDeviceEnum, int, bytes]] = asyncio.Queue()
+        self._data_buffers: dict[FrameDeviceEnum, dict[int, BytesIO]] = generate_devices_enum_dict(None, dict)
+        self._audio_buffers_sizes: dict[int, int] = {}
+        self._data_buffers_locks: dict[FrameDeviceEnum, dict[int, asyncio.Lock]] = generate_devices_enum_dict(None, dict)
+        self._audio_silent_frames_size: dict[int, int] = {}
+        self._data_latest_frame_receive_time: dict[FrameDeviceEnum, dict[int, float]] = generate_devices_enum_dict(None, dict)
 
     @property
     def is_running(self) -> bool:
@@ -100,34 +138,10 @@ class RecorderWorker:
     def _log_exception(self, user_id: int | None, msg: typing.Any, ex: Exception, **kwargs: typing.Any) -> None:
         self._logger.exception(f"{self._get_log_pre_str(user_id)} {msg}", exc_info=ex, **kwargs)
 
-    def _pcm_to_ogg(self, data: bytes) -> bytes:
-        """
-        Convert raw PCM bytes to OGG/OPUS.
-        """
-        if not data:
-            return b""
-
-        audio_data = np.frombuffer(data, dtype=np.int16)
-
-        if self._channels > 1:
-            audio_data = audio_data.reshape(-1, self._channels)
-
-        ogg_buffer = BytesIO()
-
-        sf.write(
-            file = ogg_buffer,
-            data = audio_data,
-            samplerate = self._sample_rate,
-            format = "OGG",
-            subtype = "OPUS"
-        )
-
-        return ogg_buffer.getvalue()
-
     async def _upload_files_worker(self) -> None:
         while self._is_running:
             try:
-                rpc, file_subrpc, duration, user_id = await asyncio.wait_for(
+                rpc, file_subrpc, duration, device, user_id = await asyncio.wait_for(
                     self._upload_files_workers_rpc_queue.get(),
                     timeout = 0.1
                 )
@@ -147,7 +161,7 @@ class RecorderWorker:
                 return
 
             media_subrpc = InputMediaUploadedDocument(
-                mime_type = FILE_MIME_TYPE,
+                mime_type = device.value[1],
                 file = file_subrpc,  # type: ignore
                 attributes = [
                     DocumentAttributeAudio(  # type: ignore
@@ -174,13 +188,13 @@ class RecorderWorker:
 
                 return
 
-    async def _upload_file(self, content: bytes, duration: float, user_id: int) -> None:
+    async def _upload_file(self, content: bytes, duration: float, device: FrameDeviceEnum, user_id: int) -> None:
         file_id = self._app.rnd_id()
 
         content_len = len(content)
 
         is_big = content_len > NOT_BIG_MAX_FILE_SIZE
-        filename = f"file-{file_id}.{FILE_EXT}"
+        filename = f"file-{file_id}.{device.value[0]}"
 
         if not is_big:
             rpc = SaveFilePart(
@@ -210,46 +224,47 @@ class RecorderWorker:
                 name = filename
             )
 
-        await self._upload_files_workers_rpc_queue.put((rpc, file_subrpc, duration, user_id))
+        await self._upload_files_workers_rpc_queue.put((rpc, file_subrpc, duration, device, user_id))
 
         self._log_info(user_id, f"RPC to file upload inserted into queue with:   File ID = {file_id} | Is big = {is_big}")
 
-    async def _process_pcm_buffer(self, user_id: int, read_max_size: int | None=None) -> None:
-        async with self._pcm_buffers_locks[user_id]:
-            pcm_buffer = self._pcm_buffers[user_id]
+    async def _process_data_buffer(self, device: FrameDeviceEnum, user_id: int, read_max_size: int | None=None) -> None:
+        async with self._data_buffers_locks[device][user_id]:
+            data_buffer = self._data_buffers[device][user_id]
 
             if read_max_size:
                 if read_max_size < 0:
-                    read_max_size = pcm_buffer.tell() + read_max_size + 1
+                    read_max_size = data_buffer.tell() + read_max_size + 1
 
-                pcm_data = pcm_buffer.read(read_max_size)
+                data_bytes = data_buffer.read(read_max_size)
 
             else:
-                pcm_data = pcm_buffer.getvalue()
+                data_bytes = data_buffer.getvalue()
 
-            pcm_data_len = len(pcm_data)
-            pcm_buffer.seek(0)
-            pcm_buffer.truncate()
+            data_bytes_len = len(data_bytes)
+            data_buffer.seek(0)
+            data_buffer.truncate()
 
-            if pcm_data_len == 0:
+            if data_bytes_len == 0:
                 return
 
-            ogg_data = self._pcm_to_ogg(pcm_data)
-            ogg_data_len = len(ogg_data)
+            processed_data_bytes = self.DEVICES_DATA_CONVERTERS[device](data_bytes)
+            processed_data_bytes_len = len(processed_data_bytes)
 
-            self._log_info(user_id, f"PCM converted to OGG | PCM {pcm_data_len} => OGG {ogg_data_len}")
+            self._log_info(user_id, f"Data converted to {device.value[0]} | DATA {data_bytes_len} => {device.value[0]} {processed_data_bytes_len}")
 
             await self._upload_file(
-                ogg_data,
-                pcm_data_len / self._channel_second_rate,
+                processed_data_bytes,
+                self.DEVICES_DURATION_PROCESSORS[device](processed_data_bytes),
+                device,
                 user_id
             )
 
     def _is_pcm_silent(self, pcm_data: bytes) -> bool:
         buffer = np.frombuffer(pcm_data, dtype=np.int16)
 
-        if self._channels > 1:
-            buffer = buffer.reshape(-1, self._channels).mean(axis=1)
+        if self._audio_channels > 1:
+            buffer = buffer.reshape(-1, self._audio_channels).mean(axis=1)
 
         buffer = buffer.astype(np.float32) / np.iinfo(np.int16).max
         rms = np.sqrt(np.mean(np.square(buffer)))
@@ -258,100 +273,168 @@ class RecorderWorker:
 
     async def _sender(self) -> None:
         while self._is_running:
-            while self._is_running:
-                try:
-                    user_id, chunk = await asyncio.wait_for(
-                        self._pcm_frame_queue.get(),
-                        timeout = 0.1
-                    )
+            try:
+                device, user_id, chunk = await asyncio.wait_for(
+                    self._data_frame_queue.get(),
+                    timeout = 0.1
+                )
 
-                except asyncio.TimeoutError:
-                    continue
+            except asyncio.TimeoutError:
+                continue
 
-                if user_id not in self._pcm_buffers:
-                    self._pcm_buffers[user_id] = BytesIO()
-                    self._pcm_buffers_sizes[user_id] = 0
-                    self._pcm_buffers_locks[user_id] = asyncio.Lock()
-                    self._pcm_silent_frames_size[user_id] = 0
-                    self._pcm_latest_frame_receive_time[user_id] = 0
+            if user_id not in self._data_buffers[device]:
+                self._data_buffers[device][user_id] = BytesIO()
+                self._data_buffers_locks[device][user_id] = asyncio.Lock()
+                self._data_latest_frame_receive_time[device][user_id] = 0
 
-                chunk_len = len(chunk)
+                if device is FrameDeviceEnum.MICROPHONE:
+                    self._audio_buffers_sizes[user_id] = 0
+                    self._audio_silent_frames_size[user_id] = 0
 
+            chunk_len = len(chunk)
+
+            if device is FrameDeviceEnum.MICROPHONE:
                 is_pcm_silent = self._is_pcm_silent(chunk)
 
                 if is_pcm_silent:
-                    self._pcm_silent_frames_size[user_id] += chunk_len
+                    self._audio_silent_frames_size[user_id] += chunk_len
                 else:
-                    self._pcm_silent_frames_size[user_id] = 0
+                    self._audio_silent_frames_size[user_id] = 0
 
-                self._pcm_latest_frame_receive_time[user_id] = time()
+            self._data_latest_frame_receive_time[device][user_id] = time()
 
-                if self._write_log_debug_progress:
-                    progress = self._pcm_buffers_sizes[user_id] / self._pcm_max_duration_in_size * 100
-                    self._log_debug(user_id, f"Current PCM buffer status: {self._pcm_buffers_sizes[user_id]} bytes | {progress:.5f} %")
+            if self._write_log_debug_progress:
+                if device is FrameDeviceEnum.MICROPHONE:
+                    progress = self._audio_buffers_sizes[user_id] / self._audio_max_duration_in_size * 100
+                    self._log_debug(user_id, f"Current PCM buffer status: {self._audio_buffers_sizes[user_id]} bytes | {progress:.5f} %")
 
-                is_size_enough = self._pcm_buffers_sizes[user_id] + chunk_len <= self._pcm_max_duration_in_size
-                is_silence_enough = self._pcm_silent_frames_size[user_id] >= self._pcm_silence_duration_in_size
+                else:
+                    self._log_debug(user_id, f"Current PCM buffer status: {self._audio_buffers_sizes[user_id]} bytes | duration {self._audio_buffers_sizes[user_id] / self._audio_channel_second_rate:.5f} seconds")
 
-                if is_size_enough:
-                    self._pcm_buffers[user_id].write(chunk)
-                    self._pcm_buffers_sizes[user_id] += chunk_len
+            is_duration_enough = (
+                self._audio_buffers_sizes[user_id] + chunk_len <= self._audio_max_duration_in_size
+                if device is FrameDeviceEnum.MICROPHONE
+                else
+                True  # TODO: calculate for camera and screen
+            )
 
-                if not is_size_enough or is_silence_enough:
-                    if not is_size_enough:
-                        self._log_info(user_id, "Buffer is full, processing buffer")
+            is_silence_enough = (
+                self._audio_silent_frames_size[user_id] >= self._audio_silence_duration_in_size
+                if device is FrameDeviceEnum.MICROPHONE
+                else
+                False
+            )
 
-                    else:
-                        self._log_info(user_id, "Silence detected, processing buffer")
+            if is_duration_enough:
+                self._data_buffers[device][user_id].write(chunk)
 
-                    if self._pcm_buffers_sizes[user_id] == 0 and not is_pcm_silent:
-                        raise ValueError("Received chunk size is too big, so buffer is empty")
-                    self._log_info(user_id, f"Silent frames size: {self._pcm_silent_frames_size[user_id]}")
-                    await self._process_pcm_buffer(user_id)
+                if device is FrameDeviceEnum.MICROPHONE:
+                    self._audio_buffers_sizes[user_id] += chunk_len
 
-                    if not is_size_enough:
-                        self._pcm_buffers[user_id] = BytesIO(chunk)
-                        self._pcm_buffers[user_id].seek(chunk_len)
-                        self._pcm_buffers_sizes[user_id] = chunk_len
+            if not is_duration_enough or is_silence_enough:
+                if not is_duration_enough:
+                    self._log_info(user_id, "Buffer is full, processing buffer")
 
-                    else:
-                        self._pcm_buffers[user_id] = BytesIO()
-                        self._pcm_buffers_sizes[user_id] = 0
+                else:
+                    self._log_info(user_id, "Silence detected, processing buffer")
 
-                    self._pcm_silent_frames_size[user_id] = 0
+                if device is FrameDeviceEnum.MICROPHONE:
+                    if self._audio_buffers_sizes[user_id] == 0 and not is_pcm_silent:  # type: ignore
+                        raise ValueError("Received audio chunk size is too big, so buffer is empty")
 
-            for user_id in self._pcm_buffers.keys():
-                await self._process_pcm_buffer(user_id)
+                    self._log_debug(user_id, f"Silent frames size: {self._audio_silent_frames_size[user_id]}")
 
-        self._log_info(None, "Background sender task finished.")
+                await self._process_data_buffer(device, user_id)
 
-    async def process_pcm_frame(self, frame: Frame) -> None:
+                if not is_duration_enough:
+                    self._data_buffers[device][user_id] = BytesIO(chunk)
+                    self._data_buffers[device][user_id].seek(chunk_len)
+
+                    if device is FrameDeviceEnum.MICROPHONE:
+                        self._audio_buffers_sizes[user_id] = chunk_len
+
+                else:
+                    self._data_buffers[device][user_id] = BytesIO()
+
+                    if device is FrameDeviceEnum.MICROPHONE:
+                        self._audio_buffers_sizes[user_id] = 0
+
+                if device is FrameDeviceEnum.MICROPHONE:
+                    self._audio_silent_frames_size[user_id] = 0
+
+        for device, pcm_buffers_subdict in self._data_buffers.items():
+            for user_id in pcm_buffers_subdict.keys():
+                await self._process_data_buffer(device, user_id)
+
+        self._log_debug(None, "Background sender task finished")
+
+    async def process_stream_frames_update(self, update: StreamFrames) -> None:
         """
-        Process incoming PCM frame.
+        Process incoming StreamFrames update.
         """
-        ssrc = frame.ssrc
-        user_id = self.ssrc_and_tg_id.get(ssrc, None)
+        device = CALLS_DEVICE_TO_FRAME_DEVICE.get(update.device, None)
 
-        if not user_id:
+        if not device:
+            self._log_debug(None, f"Unknown device: {update.device}")
             return
 
-        await self._pcm_frame_queue.put((user_id, frame.frame))
+        for frame in update.frames:
+            ssrc = frame.ssrc
+            user_id = self.ssrc_and_tg_id[device].get(ssrc, None)
+
+            if not user_id:
+                self._log_debug(user_id, f"Unknown user ID for SSRC: {ssrc}")
+                return
+
+            await self._data_frame_queue.put((device, user_id, frame.frame))
 
     async def _latest_frame_detector(self) -> None:
         while self._is_running:
-            await asyncio.sleep(1)
+            await asyncio.sleep(self._latest_frame_detector_interval)
 
-            for user_id in list(self._pcm_buffers.keys()):
-                if time() - self._pcm_latest_frame_receive_time[user_id] > self._latest_frame_detector_duration:
-                    self._log_info(user_id, "Latest frame detector triggered")
+            for device, pcm_buffers_subdict in self._data_buffers.items():
+                for user_id in list(pcm_buffers_subdict.keys()):
+                    if time() - self._data_latest_frame_receive_time[device][user_id] > self._latest_frame_detector_duration:
+                        self._log_info(user_id, "Latest frame detector triggered")
 
-                    await self._process_pcm_buffer(user_id)
+                        await self._process_data_buffer(device, user_id)
 
-                    del self._pcm_buffers[user_id]
-                    del self._pcm_buffers_sizes[user_id]
-                    del self._pcm_buffers_locks[user_id]
-                    del self._pcm_silent_frames_size[user_id]
-                    del self._pcm_latest_frame_receive_time[user_id]
+                        del self._data_buffers[device][user_id]
+                        del self._data_buffers_locks[device][user_id]
+                        del self._data_latest_frame_receive_time[device][user_id]
+
+                        if device is FrameDeviceEnum.MICROPHONE:
+                            self._audio_buffers_sizes[user_id] = 0
+                            self._audio_silent_frames_size[user_id] = 0
+
+        self._log_debug(None, "Latest frame detector task finished")
+
+    def _guess_participant_devices_and_ssrcs(self, participant: GroupCallParticipant) -> list[tuple[FrameDeviceEnum, int]]:
+        ssrc = participant.source
+
+        results = [
+            (FrameDeviceEnum.MICROPHONE, ssrc)
+        ]
+
+        if participant.video_camera and participant.video_info:
+            # self._log_debug(None, f"Guessing participant: {participant.user_id} - {participant.source} - camera sources {participant.video_info.sources} ({len(participant.video_info.sources)})")  # type: ignore
+
+            # for i, source in enumerate(participant.video_info.sources):  # type: ignore
+            #     self._log_debug(None, f"Source {i}: {source.semantics} {source.ssrcs}")
+
+            for source in participant.video_info.sources:  # type: ignore
+                if source.semantics == "SIM":
+                    results.append((FrameDeviceEnum.CAMERA, source.ssrcs[0]))  # type: ignore
+
+                    break
+
+        # elif participant.screen_sharing:  # TODO: screen sharing
+
+        return results
+
+    def _update_participant_ssrcs(self, participant: GroupCallParticipant) -> None:
+        for device, ssrc in self._guess_participant_devices_and_ssrcs(participant):
+            self.ssrc_and_tg_id[device].inverse[participant.user_id] = ssrc
 
     async def _participants_monitor(self) -> None:
         while self._is_running:
@@ -371,6 +454,7 @@ class RecorderWorker:
             participants_count = len(participants)
 
             for participant in participants:
+                # self._log_info(None, f"Participant: {participant.user_id} - {participant.source} - video {participant.video} - screen sharing {participant.screen_sharing} - video camera {participant.video_camera} - screen sharing {participant.screen_sharing}")  # TODO: remove
                 user_id = participant.user_id
 
                 if user_id == self._join_as_id:
@@ -379,9 +463,10 @@ class RecorderWorker:
                     continue
 
                 if self.to_listen_user_ids and user_id not in self.to_listen_user_ids:
+                    self._log_info(user_id, "User ID is not in to listen user IDs")  # TODO: remove
                     continue
 
-                self.ssrc_and_tg_id.inverse[user_id] = participant.source
+                self._update_participant_ssrcs(participant)
 
             self._log_debug(None, f"""Participants in chat: {participants_count} (until shutdown: {(self._none_participants_timeout - (utils.get_timestamp_int() - self._none_participants_first_time)) if self._none_participants_first_time else f">{self._none_participants_timeout}"} seconds)""")
 
@@ -396,6 +481,13 @@ class RecorderWorker:
                 await self.stop()
 
                 break
+
+        self._log_debug(None, "Participants monitor task finished")
+
+    def _process_participant_joined(self, participant: GroupCallParticipant) -> None:
+        self._log_info(participant.user_id, "Participant joined")
+
+        self._update_participant_ssrcs(participant)
 
     async def _wrapper_logger(self, coro: typing.Awaitable[T]) -> T | None:
         try:
@@ -414,10 +506,10 @@ class RecorderWorker:
         self._is_running = True
 
         self._app_file_session = Session(
-            self._app,
-            await self._app.storage.dc_id(),  # type: ignore
-            await self._app.storage.auth_key(),  # type: ignore
-            await self._app.storage.test_mode(),  # type: ignore
+            client = self._app,
+            dc_id = await self._app.storage.dc_id(),  # type: ignore
+            auth_key = await self._app.storage.auth_key(),  # type: ignore
+            test_mode = await self._app.storage.test_mode(),  # type: ignore
             is_media = True
         )
 
@@ -436,9 +528,9 @@ class RecorderWorker:
             chat_id = self.join_chat_id,
             stream = RecordStream(
                 audio = True,
-                audio_parameters = self._quality,
-                camera = False,
-                screen = False
+                audio_parameters = self._audio_quality,
+                camera = True,
+                screen = False  # TODO: screen sharing
             ),
             config = GroupCallConfig(
                 join_as = self._join_as_peer
